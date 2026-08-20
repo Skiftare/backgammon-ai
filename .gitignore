@@ -1,0 +1,34 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+uv.lock
+.uv/
+
+# обучение/артефакты
+*.pth
+*.pt
+*.onnx
+runs/
+logs/
+checkpoints/
+*.png
+!models/*.md
+
+# окружение/секреты
+.env
+.env.*
+*.p12
+credentials.json
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# данные
+data/**
+!data/.gitkeep
