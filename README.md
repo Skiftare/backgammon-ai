@@ -13,7 +13,9 @@
 - [x] uv-окружение (numpy, pytest, ruff, torch — в deps)
 - [x] `core/dice.py` — честные кости (детерм., seed)
 - [x] `core/board.py` — позиция 24 пункта + бар + дом (нотация как у движка)
-- [x] `core/_engine/` — MIT-движок правил (gym-backgammon) + LICENSE
+- [x] `core/_engine/` — MIT-движок (gym-backgammon) — используем как Oracle в тестах
+- [x] `core/game.py` — **свой движок правил** (генерация + применение, детерминированный)
+      — стабильное ядро; TODO: bearing-фаза (вынос с переполнением, 3/20 края)
 - [x] `core/engine.py` — `legal_moves` / `apply_move` (обёртка над движком)
 - [x] `core/moves.py` — `Move`, выбор из легальных (архитектурный контракт)
 - [x] `core/features.py` — фич-энкодер позиции (293-d, «со стороны ходящего»)

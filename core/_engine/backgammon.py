@@ -1518,10 +1518,5 @@ def assert_board(action, board, bar, off, game=None, old_board=None):
 
 
 def print_assert(game, sum_white, sum_black, bar, off, action, old_board):
-    if game is not None:
-        game.render()
-
-    if old_board is not None:
-        game.board = old_board
-        game.render()
-    print("sum_white={} | sum_black={} | bar={} | off={} | action={}".format(sum_white, sum_black, bar, off, action))
+    # отладочный шум отключён; при желании включить render обратно
+    print("bg-assert (fallback): sum_white={} sum_black={} bar={} off={} action={}".format(sum_white, sum_black, bar, off, action))
