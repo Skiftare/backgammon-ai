@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.4.6",
     "pytest>=9.1.1",
     "tensorboard>=2.16",
+    "flask>=3.0",
     "torch>=2.13.0",
 ]
 
