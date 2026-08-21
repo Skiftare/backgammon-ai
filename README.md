@@ -8,6 +8,28 @@
 Сейчас: инженерия ядра (детерминированная среда) **готова**; ML-часть начата
 (value-сеть + TD(λ)-обучение; сперва backprop-plan база, потом PC/EP).
 
+## Запуск и мониторинг (целевая машина с torch)
+
+```
+uv sync                                        # поставит numpy/pytest/torch
+uv run pytest                                  # тесты (среда+движок; ML-тест — см. ниже)
+
+# Обучение (self-play + TD(λ)):
+uv run python train.py --epochs 500 --hidden 128 --lr 1e-3 \
+    --tblog runs/narды --replay-every-min 5
+
+# Графики:
+uv run tensorboard --logdir runs/narды          # loss, длина партии, победы
+
+# Реплей партий: выгружается раз в N минут в runs/narды/replays/replay_<step>_<ts>.json
+# (JSON позиций: points + bar/home + turn) — можно скриптом превратить в картинку/видео.
+
+# Чекпоинты: checkpoints/net_<epoch>.pt и net_final.pt.
+```
+
+Хочешь посмотреть, как агент улучшается за время — открываешь TensorBoard
+(кривые loss/win) и time-lapse реплеев: партии короче/победы чаще.
+
 ## Статус
 
 - [x] uv-окружение (numpy, pytest, ruff, torch — в deps)

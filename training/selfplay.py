@@ -17,7 +17,7 @@ import random
 import torch
 
 from core.board import Position, TOTAL_CHECKERS
-from core.engine import legal_moves, apply_move
+from core.game import legal_moves, apply_move
 from core.features import Encoder
 from model.net import ValueNet
 
