@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .board import Position, N_POINTS
+from .board import N_POINTS, Position
 
 MAX_ON_POINT = 6
 

@@ -10,15 +10,13 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import random
 
 import torch
 
-from core.board import Position, TOTAL_CHECKERS
-from core.game import legal_moves, apply_move
+from core.board import TOTAL_CHECKERS, Position
 from core.features import Encoder
+from core.game import apply_move, legal_moves
 from model.net import ValueNet
 
 
@@ -40,8 +38,8 @@ def choose_greedy(pos: Position, roll, net: ValueNet, encoder: Encoder) -> Posit
             turn=_other(pos.turn),
         )
 
-    best: Optional[Position] = None
-    best_v: Optional[float] = None
+    best: Position | None = None
+    best_v: float | None = None
     for m in moves:
         nxt = apply_move(pos, m)
         x = torch.tensor(encoder.encode(nxt), dtype=torch.float32).unsqueeze(0)

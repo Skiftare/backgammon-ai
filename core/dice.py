@@ -9,8 +9,8 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import Iterator, Sequence
 
 DIE_MIN = 1
 DIE_MAX = 6

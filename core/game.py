@@ -19,15 +19,11 @@ home_white / home_black — вынесенные.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from itertools import permutations
-from typing import List, Optional, Sequence, Tuple
-
-from .board import Position, TOTAL_CHECKERS, N_POINTS
+from .board import N_POINTS, TOTAL_CHECKERS, Position
 from .dice import DiceRoll
-from .moves import Move, BAR, OFF
+from .moves import BAR, OFF, Move
 
-STEP = Tuple[int, int]  # (from_label, to_label): -1 = bar, 99 = off, иначе index
+STEP = tuple[int, int]  # (from_label, to_label): -1 = bar, 99 = off, иначе index
 
 
 def _dir(turn: str) -> int:
@@ -38,7 +34,7 @@ def _own(pos: Position, p: int) -> int:
     """Число фишек текущего игрока на точке p (положительное)."""
     v = pos.points[p]
     if _dir(pos.turn) == 1:
-        return v if v > 0 else 0
+        return max(0, v)
     return -v if v < 0 else 0
 
 
@@ -100,10 +96,7 @@ def _apply_step(pos: Position, step: STEP) -> Position:
         bar_me -= 1
         if to < 0 or to >= N_POINTS:
             raise ValueError("вход с бара вне доски")
-        if d == 1 and pts[to] == -1:
-            bar_opp += 1
-            pts[to] = 0
-        elif d == -1 and pts[to] == 1:
+        if d == 1 and pts[to] == -1 or d == -1 and pts[to] == 1:
             bar_opp += 1
             pts[to] = 0
         set_own(to, +1)
@@ -120,10 +113,7 @@ def _apply_step(pos: Position, step: STEP) -> Position:
         if own_at(fr) <= 0:
             raise ValueError("нет фишки на source")
         # если на to блот соперника — бить
-        if d == 1 and pts[to] == -1:
-            bar_opp += 1
-            pts[to] = 0
-        elif d == -1 and pts[to] == 1:
+        if d == 1 and pts[to] == -1 or d == -1 and pts[to] == 1:
             bar_opp += 1
             pts[to] = 0
         set_own(fr, -1)
@@ -139,9 +129,9 @@ def _apply_step(pos: Position, step: STEP) -> Position:
     )
 
 
-def _single_moves(pos: Position, step: int) -> List[STEP]:
+def _single_moves(pos: Position, step: int) -> list[STEP]:
     """Все атомарные шаги по одной кости (для текущего игрока)."""
-    out: List[STEP] = []
+    out: list[STEP] = []
     # вход с бара
     if _bar(pos) > 0:
         p = _entry_point(pos.turn, step)
@@ -177,7 +167,7 @@ def _single_moves(pos: Position, step: int) -> List[STEP]:
     return out
 
 
-def legal_moves(pos: Position, roll: DiceRoll) -> List[Move]:
+def legal_moves(pos: Position, roll: DiceRoll) -> list[Move]:
     """Все полные легальные ходы (максимального числа костей) для текущего игрока.
 
     DFS: применяем кости в любом порядке; на каждом узле перебираем все атомарные
@@ -185,9 +175,9 @@ def legal_moves(pos: Position, roll: DiceRoll) -> List[Move]:
     числу применённых костей (правило обязательности/максимизации).
     """
     steps_all = list(roll)  # уже развёрнут в кортеж (2 или 4)
-    results: List[Tuple[STEP, ...]] = []
+    results: list[tuple[STEP, ...]] = []
 
-    def dfs(pos_: Position, rem: List[int], path: Tuple[STEP, ...]) -> None:
+    def dfs(pos_: Position, rem: list[int], path: tuple[STEP, ...]) -> None:
         # если остались кости, и никакой шаг невозможен — заканчиваем (частичный)
         if not rem:
             if path:
@@ -208,7 +198,7 @@ def legal_moves(pos: Position, roll: DiceRoll) -> List[Move]:
     dfs(pos, steps_all, ())
     # дедуп: порядок шагов ВАЖЕН (это последовательность применения: следующий шаг
     # строится на результате предыдущего), поэтому ключ — сам кортеж, не sorted.
-    uniq: dict[Tuple[STEP, ...], None] = {}
+    uniq: dict[tuple[STEP, ...], None] = {}
     for r in results:
         uniq.setdefault(r, None)
     best = sorted(uniq.keys(), key=len, reverse=True)

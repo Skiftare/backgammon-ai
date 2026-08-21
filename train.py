@@ -30,7 +30,6 @@ from datetime import datetime
 
 import torch
 
-from core.board import Position
 from core.features import Encoder
 from model.net import make_value_net
 from training.selfplay import play_one_game

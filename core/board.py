@@ -39,7 +39,7 @@ class Position:
             raise ValueError(f"неизвестный игрок: {self.turn!r}")
 
     @classmethod
-    def initial(cls) -> "Position":
+    def initial(cls) -> Position:
         """Стартовая расстановка коротких нард (совпадает с движком)."""
         pts = [0] * N_POINTS
         # белые (положительные) — как в init_board(): board[5], [7], [12], [23]
