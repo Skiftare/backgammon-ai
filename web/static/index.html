@@ -47,12 +47,12 @@ function triAt(x,y){ // индекс по клику
 }
 // NOTE: координаты: индексы 0..23. Верхний ряд = 12..23, нижний = 0..11
 function indexToXY(i){
-  if(i>=12){ const c=i-12; return {x:(c+0.5)*TW, y:H/2-30}; } // верх 12..23 (слева=12)
-  else     { const c=i;     return {x:(c+0.5)*TW, y:H/2+30}; } // низ 0..11
+  if(i<12){ const c=i;     return {x:(c+0.5)*TW, y:H/2-30}; } // ВЕРХ 0..11 слева→право
+  else    { const c=i-12;  return {x:(c+0.5)*TW, y:H/2+30}; } // НИЗ  12..23 слева→право
 }
 function xyToIndex(x,y){
   const c=Math.floor(x/TW);
-  return (y<H/2) ? (12+c) : (c); // верх index 12+c
+  return (y<H/2) ? c : (12+c);
 }
 
 function ownAt(i){ const v=state.points[i]; return side==='white'? v: -v; }
@@ -61,16 +61,18 @@ function draw(){
   ctx.clearRect(0,0,W,H);
   // board bg
   ctx.fillStyle='#23343f'; ctx.fillRect(0,0,W,H);
-  // triangles
+  // triangles: ВЕРХ 0..11 — остриём ВНИЗ (вершина на H/2); НИЗ 12..23 — остриём ВВЕРХ (вершина на H/2)
   for(let i=0;i<24;i++){
-    const x0=(i%TRI)*TW, y0=(i>=12?0:H/2);
-    const up=(i>=12);
-    const cx=(i%TRI)*TW+TW/2;
-    const cy= up?0:H/2;
+    const col=i%TRI;
+    const x0=col*TW;
+    const cx=x0+TW/2;
+    const isTop=(i<12);
+    const baseY=isTop?0:H/2;
+    const tipY=isTop?H/2:H;      // верх: база сверху, остриё вниз; низ: база снизу, остриё вверх
     ctx.beginPath();
-    ctx.moveTo(x0, up?0:H/2);
-    ctx.lineTo(x0+TW, up?0:H/2);
-    ctx.lineTo(cx, up?TH:H);
+    ctx.moveTo(x0, baseY);
+    ctx.lineTo(x0+TW, baseY);
+    ctx.lineTo(cx, tipY);
     ctx.closePath();
     ctx.fillStyle = ((i%2)===0)?'#7f8c8d':'#b0b0b0';
     if(sel!==null&&i===sel) ctx.fillStyle='#e67e22';
@@ -83,9 +85,12 @@ function draw(){
       const color= n>0?'white':'black';
       const {x,y}=indexToXY(i);
       const rad=16;
+      const isTop=(i<12);
       for(let k=0;k<cnt && k<8;k++){
+        // верхний ряд: фишки лежат сверху вниз; нижний — снизу вверх
         const dy=(k%4)*rad*1.2;
-        ctx.beginPath();ctx.arc(x, y + ((up?1:-1)*dy), rad,0,7);ctx.fillStyle=color;ctx.fill();
+        const yy = isTop ? (y + (k%4===0?16:0) + 0) : (y - 0); // упрощённо: по центру ряда
+        ctx.beginPath();ctx.arc(x, y + (isTop? 18+((k%4)*rad*1.1) : -(18+((k%4)*rad*1.1))), rad,0,7);ctx.fillStyle=color;ctx.fill();
         ctx.strokeStyle='#000';ctx.stroke();
       }
     }
