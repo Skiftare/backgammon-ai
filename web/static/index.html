@@ -2,164 +2,108 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"/>
-<title>Нарды vs агент</title>
+<title>Нарды · человек vs агент</title>
+<link rel="stylesheet" href="/vendor/bgboard/css/bgboard.css"/>
 <style>
   body{font-family:sans-serif;background:#1b1f27;color:#dfe6ee;margin:0;display:flex;flex-direction:column;align-items:center;}
   h1{font-size:20px;margin:12px 0 4px;}
-  #board{border:2px solid #3a4; background:#2a3b4c; border-radius:12px; cursor:pointer; margin-top:8px;}
-  .bar{display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:14px;}
+  #boardbox{position:relative;}
+  .bar{display:flex;gap:8px;align-items:center;margin:8px 0;font-size:14px;}
   .btn{background:#2f6f4e;border:none;color:#fff;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px;}
-  .btn:hover{filter:brightness(1.15)}
-  #status{font-size:14px;color:#cfe;margin-top:8px;min-height:18px;}
-  #msg{font-size:13px;color:#ffd;margin-top:4px;min-height:16px;}
+  #status{font-size:14px;color:#cfe;min-height:18px;}
+  #msg{font-size:13px;color:#ffd;min-height:16px;}
 </style>
 </head>
 <body>
 <h1>Нарды · человек vs агент</h1>
 <div class="bar">
   <button class="btn" id="btnNew">Новая игра</button>
-  <span id="status">Нажми «Новая игра»</span>
+  <span id="status"></span>
 </div>
-<canvas id="board" width="720" height="400"></canvas>
+<div id="boardbox"><div id="board1"></div></div>
 <div id="msg"></div>
 
+<script src="/vendor/bgboard/js/bgboard.js"></script>
 <script>
-const CV=document.getElementById('board'), ctx=CV.getContext('2d');
-const W=CV.width, H=CV.height;
-const TRI=12, TW=W/TRI, TH=H/2;
-const PALETTE={white:'#f5f5f5', black:'#c0392b', bg:'#2c3e50', triA:'#7f8c8d', triB:'#b0b0b0', hl:'#f1c40f', sel:'#e67e22'};
+const FILES='/vendor/bgboard/';
+let board=null, state=null, side='black', roll=null, legals=[], sel=null;
 
-let state=null;      // {points[], bar_*, home_*, turn, terminal}
-let side='black';    // за кого человек
-let roll=null;       // последний бросок человека [..]
-let legals=[];       // полные легальные ходы (последовательностей шагов)
-let sel=null;        // выбранная точка (source)
-
-function triPoint(i){ // центр треугольника (верх/низ)
-  const col=i%TRI;
-  const x=col*TW+TW/2;
-  const y = i<TRI ? H/2-30 : H/2+30;
-  return {x,y};
-}
-function triAt(x,y){ // индекс по клику
-  if(y<H/2){ const col=Math.floor(x/TW); return (col); }       // верх: 12..23? -> map
-  else      { const col=Math.floor(x/TW); return TRI+col; }
-}
-// NOTE: координаты: индексы 0..23. Верхний ряд = 12..23, нижний = 0..11
-function indexToXY(i){
-  if(i<12){ const c=i;     return {x:(c+0.5)*TW, y:H/2-30}; } // ВЕРХ 0..11 слева→право
-  else    { const c=i-12;  return {x:(c+0.5)*TW, y:H/2+30}; } // НИЗ  12..23 слева→право
-}
-function xyToIndex(x,y){
-  const c=Math.floor(x/TW);
-  return (y<H/2) ? c : (12+c);
+function redraw(pos){
+  if(!board){ board = new BgBoard({filesRoot:FILES, containerSelector:'#board1', scale:1.0}); }
+  // наш Position совпадает с GNU arrPoints (белые +, чёрные −, индексы 0..23)
+  board.arrPoints = pos.points.slice();
+  board.arrBar = [pos.bar_white, pos.bar_black];
+  board.intDice = 0; board.strDice='';
+  board.drawBoard();
+  document.getElementById('status').textContent = pos.terminal? 'ИГРА ОКОНЧЕНА':
+    'Ход: '+(pos.turn==='white'?'Белые':'Чёрные')+(pos.turn===side?' (твой)':' (агент)');
 }
 
-function ownAt(i){ const v=state.points[i]; return side==='white'? v: -v; }
-// direction: человеческие фишки (сторона): we move +1 (white->23 / black->0)
-function draw(){
-  ctx.clearRect(0,0,W,H);
-  // board bg
-  ctx.fillStyle='#23343f'; ctx.fillRect(0,0,W,H);
-  // triangles: ВЕРХ 0..11 — остриём ВНИЗ (вершина на H/2); НИЗ 12..23 — остриём ВВЕРХ (вершина на H/2)
-  for(let i=0;i<24;i++){
-    const col=i%TRI;
-    const x0=col*TW;
-    const cx=x0+TW/2;
-    const isTop=(i<12);
-    const baseY=isTop?0:H/2;
-    const tipY=isTop?H/2:H;      // верх: база сверху, остриё вниз; низ: база снизу, остриё вверх
-    ctx.beginPath();
-    ctx.moveTo(x0, baseY);
-    ctx.lineTo(x0+TW, baseY);
-    ctx.lineTo(cx, tipY);
-    ctx.closePath();
-    ctx.fillStyle = ((i%2)===0)?'#7f8c8d':'#b0b0b0';
-    if(sel!==null&&i===sel) ctx.fillStyle='#e67e22';
-    ctx.fill();
-    // checkers
-    const n=state.points[i];
-    const own = side==='white'? n: -n;
-    if(n){
-      const cnt=Math.abs(n);
-      const color= n>0?'white':'black';
-      const {x,y}=indexToXY(i);
-      const rad=16;
-      const isTop=(i<12);
-      for(let k=0;k<cnt && k<8;k++){
-        // верхний ряд: фишки лежат сверху вниз; нижний — снизу вверх
-        const dy=(k%4)*rad*1.2;
-        const yy = isTop ? (y + (k%4===0?16:0) + 0) : (y - 0); // упрощённо: по центру ряда
-        ctx.beginPath();ctx.arc(x, y + (isTop? 18+((k%4)*rad*1.1) : -(18+((k%4)*rad*1.1))), rad,0,7);ctx.fillStyle=color;ctx.fill();
-        ctx.strokeStyle='#000';ctx.stroke();
-      }
-    }
-  }
-  // highlight: for sel point, draw reachable targets
-  if(sel!==null){
-    const targets=new Set();
-    for(const mv of legals){
-      for(const st of mv){ if(st[0]===sel) targets.add(st[1]); }
-    }
-    for(const t of targets){ if(t===-1||t===99)continue; const {x,y}=indexToXY(t); ctx.beginPath();ctx.arc(x,y,8,0,7);ctx.fillStyle='rgba(241,196,15,.9)';ctx.fill(); }
-  }
-  // bars
-  ctx.fillStyle='#cfd8dc';ctx.font='13px sans-serif';
-  ctx.fillText('barW '+state.bar_white+'  barB '+state.bar_black+'  offW '+state.home_white+'  offB '+state.home_black, 12, H-6);
-  ctx.fillStyle='#ffd';ctx.fillText('ход: '+(state.turn==='white'?'Белые':'Чёрные')+'| ты: '+(side), 12, 18);
-}
+async function api(p, body){ const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
 
-async function api(path, body){ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
-async function newGame(){ side = (side==='black')?'white':'black'; const r=await api('/api/new',{side}); state=r.pos; roll=null; legals=[]; sel=null; draw(); setStatus(); if(state.turn!==side){ await agentGo(); } }
-async function setStatus(){ const who=state.turn==='white'?'Белые':'Чёрные'; document.getElementById('status').textContent=(state.terminal)? 'ИГРА ОКОНЧЕНА' : ('Ход: '+who+(state.turn===side?' (твой)':' (агент)')); }
-
-async function agentGo(){
-  setStatus(); draw();
-  const r= await api('/api/agent',{pos: state});
-  state=r.pos; draw(); setStatus();
-}
 async function onRoll(){
   const r=await api('/api/roll',{pos:state});
   state=r.pos; roll=r.roll; legals=r.legal_moves; sel=null;
-  document.getElementById('msg').textContent='Бросок: '+roll.join(' ');
-  draw();
+  redraw(state); document.getElementById('msg').textContent='Бросок: '+roll.join(' ')+' | кликни свою фишку';
+}
+async function agentGo(){
+  const r=await api('/api/agent',{pos:state});
+  state=r.pos; redraw(state);
 }
 async function doHumanMove(from,to){
-  // найти legal move, последний шаг которого заканчивается на to и начинается с from
   let chosen=null;
-  for(const mv of legals){
-    const sts=mv; if(!sts.length)continue;
-    if(sts[0][0]===from && sts[sts.length-1][1]===to){ chosen=mv; break; }
-    // может начинаться с from (первый шаг)
-    if(sts[0][0]===from){ chosen=mv; break; }
-  }
-  if(!chosen){ document.getElementById('msg').textContent='Этот ход нельзя (нет такого легального)'; return; }
-  const steps=chosen.map(s=>[s[0],s[1]]);
-  const r= await api('/api/move',{pos:state, roll:roll, steps});
+  for(const mv of legals){ const sts=mv; if(sts.length&&sts[0][0]===from&&sts[sts.length-1][1]===to){chosen=mv;break;} }
+  if(!chosen){ document.getElementById('msg').textContent='Недопустимый ход'; return; }
+  const r=await api('/api/move',{pos:state,roll,steps:chosen.map(s=>[s[0],s[1]])});
   if(r.error){ document.getElementById('msg').textContent=r.error; return; }
-  state=r.pos; roll=null; legals=[]; sel=null;
-  draw(); setStatus();
-  // агент отвечает
+  state=r.pos; roll=null; legals=[]; sel=null; redraw(state);
   if(!state.terminal) await agentGo();
 }
+async function newGame(){
+  side=(side==='black')?'white':'black';
+  const r=await api('/api/new',{side}); state=r.pos; roll=null; legals=[]; sel=null;
+  redraw(state);
+  if(state.turn!==side) await agentGo();
+}
 
-CV.addEventListener('click', async (e)=>{
-  const rect=CV.getBoundingClientRect();
+// клики: по формулам bgboard (внешний клик по доске; перехватываем клик по столбцу)
+document.getElementById('board1').addEventListener('click', async (e)=>{
+  if(!state || state.terminal) return;
+  if(state.turn!==side) return;
+  if(!roll){ await onRoll(); return; }
+  // определить индекс точки по координатам клика (формулы bgboard: pointiToLeftOffset)
+  const rect=e.currentTarget.getBoundingClientRect();
   const x=e.clientX-rect.left, y=e.clientY-rect.top;
-  const idx=xyToIndex(x,y);
-  if(state.turn!==side){ return; }  // не наша очередь
-  if(!roll){ await onRoll(); return; } // нет броска — бросим
-  // выбрать фишку или цель
+  const LW=board.CHECK_SIDE_LENGTH||50;
+  const col=Math.floor(x/LW);
+  // воспроизводим формулу pointiToLeftOffset в обратную сторону
+  const idx=pointFromCol(col);
+  if(idx===null){ document.getElementById('msg').textContent='клик вне доски'; return; }
   if(sel===null){
-    if(ownAt(idx)>0){ sel=idx; draw(); }
+    const v=state.points[idx];
+    const own=(side==='white')?v:-v;
+    if(own>0){ sel=idx; redraw(state); document.getElementById('msg').textContent='Фишка выбрана (точка '+idx+'). Кликни цель.'; }
     else document.getElementById('msg').textContent='Тут нет твоей фишки';
   } else {
     await doHumanMove(sel, idx);
   }
 });
 
+function pointFromCol(col){
+  // обратная к pointiToLeftOffset (без бара): левая колонка = 2 (bearoff) смещение
+  // берём приближённо: col 0..23
+  if(col<0||col>23) return null;
+  // формула bgboard: point=11-(col-2) для top при col>=2.. и т.д. — упростим прямым маппингом:
+  // т.к. bgboard колонки: 0,1 = левый bearoff tray; 2..13 верх (правый→левый), 14=?, 15..26 низ
+  // для MVP используем маппинг "24 точки по индексу arrPoints":
+  // top: col 2..13 → pointi 11,10,...,0 ; низ: col 15..26 → pointi 12..23
+  let p=null;
+  if(col>=2&&col<=13){ p=11-(col-2); }
+  else if(col>=15&&col<=26){ p=12+(col-15); }
+  return p;
+}
+
 document.getElementById('btnNew').addEventListener('click', newGame);
-// инициализация: новая игра
 newGame();
 </script>
 </body>
