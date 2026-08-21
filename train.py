@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """Запуск обучения агента нард (self-play + TD(λ)) с мониторингом.
 
+Ключевые фичи для практики:
+- **продолжение обучения**: `--resume` грузит последний чекпоинт и продолжает
+  TensorBoard с реального шага (кривые не начинаются заново);
+- **отдельный run на каждый запуск**: по умолчанию логдир = `<tblog>/<дата_время>`,
+  так что разные запуски не смешиваются и TB показывает ровно один прогон;
+- **чекпоинты** каждые `--save-every` + `net_final.pt`.
+
 Использование:
-    uv run python train.py --epochs 1000 --tblog runs/narды
-
-Цикл:
-- каждая «эпоха» = одна партия self-play (greedy по value-сети);
-- после партии — TD(λ)-обновление (training.td.train_episode);
-- метрики в TensorBoard:
-    * loss (TD-error²) + EMA loss      — главная кривая сходимости
-    * winrate (скользящее окно)        — accuracy агента в self-play
-    * mean_value                       — калибровка value (средний прогноз)
-    * game_len                         — длина партии (короче → сильнее)
-    * reward (средний)                 — итог партии (+1/0/-1)
-    * win_white / win_black            — дисбаланс сторон
-- чекпоинты весов, реплей-last (JSON) раз в N минут (дефолт 5).
-
-TensorBoard: `uv run tensorboard --logdir runs/narды`.
+    uv run python train.py --epochs 1000 --tblog runs/narды          # новый прогон
+    uv run python train.py --resume --epochs 500 --tblog runs/narды  # продолжить
+    uv run tensorboard --logdir runs/narды
 """
 
 from __future__ import annotations
@@ -30,6 +25,7 @@ from datetime import datetime
 
 import torch
 
+from core.board import Position  # noqa: F401  (для читаемости реплея)
 from core.features import Encoder
 from model.net import make_value_net
 from training.selfplay import play_one_game
@@ -44,6 +40,23 @@ except Exception:
 
 def _mean(xs):
     return sum(xs) / len(xs) if xs else 0.0
+
+
+def _last_ckpt(ckpt_dir: str) -> str | None:
+    """Путь к чекпоинту с максимальным номером эпохи, либо None."""
+    if not os.path.isdir(ckpt_dir):
+        return None
+    cands = []
+    for f in os.listdir(ckpt_dir):
+        if f.startswith("net_") and f.endswith(".pt") and f != "net_final.pt":
+            try:
+                cands.append((int(f[4:-3]), os.path.join(ckpt_dir, f)))
+            except ValueError:
+                pass
+    if not cands:
+        return None
+    cands.sort(key=lambda x: x[0])
+    return cands[-1][1]
 
 
 def save_replay(traj, winner, out_dir: str, step: int) -> str:
@@ -72,6 +85,8 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=100)
     ap.add_argument("--replay-every-min", type=float, default=5.0)
     ap.add_argument("--max-steps", type=int, default=500)
+    ap.add_argument("--resume", action="store_true", help="грузить последний чекпоинт и продолжить")
+    ap.add_argument("--run-tag", default=None, help="метка запуска (по умолчанию дата_время)")
     args = ap.parse_args()
 
     random.seed(args.seed)
@@ -80,41 +95,49 @@ def main() -> None:
     net = make_value_net(enc.dim(), hidden=args.hidden)
     net.train()
 
-    writer = SummaryWriter(args.tblog) if _HAS_TB else None
     os.makedirs(args.ckpt_dir, exist_ok=True)
-    repl_dir = os.path.join(args.tblog, "replays")
-    os.makedirs(repl_dir, exist_ok=True)
+    start_step = 0
+    if args.resume:
+        last = _last_ckpt(args.ckpt_dir)
+        if last is None:
+            print("Нет чекпоинта — стартую с нуля.", flush=True)
+        else:
+            net.load_state_dict(torch.load(last, map_location="cpu"))
+            start_step = int(os.path.basename(last)[4:-3])
+            print(f"Resume: {last} (продолжаю с шага {start_step})", flush=True)
 
-    print(f"TB: {'yes' if writer else 'no (tensorboard не установлен)'} | log: {args.tblog}", flush=True)
+    # уникальный run-директорий на запуск, чтобы TB не мешал запуски
+    tag = args.run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
+    logdir = os.path.join(args.tblog, tag)
+    writer = SummaryWriter(logdir) if _HAS_TB else None
+    repl_dir = os.path.join(logdir, "replays")
+
+    print(f"TB: {'yes' if writer else 'no'} | logdir: {logdir}", flush=True)
     last_replay = time.time()
 
-    # накопители метрик (окно для скользящих)
     W = 100
     wins, lens, rewards, losses = [], [], [], []
     for epoch in range(1, args.epochs + 1):
-        rng = random.Random(args.seed + epoch)
+        step = start_step + epoch
+        rng = random.Random(args.seed + step)
         traj, winner = play_one_game(net, enc, rng=rng, max_steps=args.max_steps)
         loss = train_episode(net, enc, traj, winner, lam=args.lam, lr=args.lr)
 
-        # метрики партии
         win = 1.0 if winner == "white" else 0.0
-        # reward: +1 если ходящий победил (для белого), иначе -1 (простая форма)
         reward = 1.0 if winner == "white" else -1.0
-        # mean value сети по траектории (калибровка value-сети)
         with torch.no_grad():
-            Xs = torch.stack([torch.tensor(enc.encode(p), dtype=torch.float32) for p in traj[:: max(1, len(traj) // 50)]])
+            ss = traj[:: max(1, len(traj) // 50)]
+            Xs = torch.stack([torch.tensor(enc.encode(p), dtype=torch.float32) for p in ss])
             mv = float(net.value(Xs).mean())
-        loss_v = float(loss)
 
-        losses.append(loss_v); wins.append(win); lens.append(len(traj)); rewards.append(reward)
-        if len(wins) > W:  # скользящее окно
-            wins.pop(0); lens.pop(0); rewards.pop(0); losses.pop(0)
+        losses.append(float(loss)); wins.append(win); lens.append(len(traj)); rewards.append(reward)
+        if len(wins) > W:
+            losses.pop(0); wins.pop(0); lens.pop(0); rewards.pop(0)
 
         log = {
-            "loss": loss_v,
+            "loss": float(loss),
             "loss_ema": _mean(losses),
-            "winrate": _mean(wins),           # accuracy self-play (окно W)
-            "winrate_cum": (sum(wins) ) / len(wins),
+            "winrate": _mean(wins),
             "mean_value": mv,
             "game_len": len(traj),
             "game_len_avg": _mean(lens),
@@ -125,26 +148,22 @@ def main() -> None:
         }
         if writer is not None:
             for k, v in log.items():
-                writer.add_scalar(f"train/{k}", v, epoch)
-            # hi-метрики в одну таблицу (гистограммы/скаляры в графике)
-            writer.add_scalar("train/EMA", log["loss_ema"], epoch)
+                writer.add_scalar(f"train/{k}", v, step)
         else:
             if epoch % 20 == 0 or epoch == 1:
-                print(f"epoch {epoch:4d} | loss {loss_v:.4f} | wr {_mean(wins):.2f} | len {len(traj):3d} | mv {mv:.3f}", flush=True)
+                print(f"step {step} | loss {float(loss):.4f} | wr {_mean(wins):.2f} | len {len(traj):3d}", flush=True)
 
-        # реплей раз в N минут
         if time.time() - last_replay >= args.replay_every_min * 60:
             last_replay = time.time()
-            path = save_replay(traj, winner, repl_dir, epoch)
-            print(f"[replay] {path}", flush=True)
+            print("[replay]", save_replay(traj, winner, repl_dir, step), flush=True)
 
-        if epoch % args.save_every == 0:
-            p = os.path.join(args.ckpt_dir, f"net_{epoch}.pt")
+        if step % args.save_every == 0:
+            p = os.path.join(args.ckpt_dir, f"net_{step}.pt")
             torch.save(net.state_dict(), p)
             print(f"[ckpt] {p}", flush=True)
 
     torch.save(net.state_dict(), os.path.join(args.ckpt_dir, "net_final.pt"))
-    print("Готово. TB:", args.tblog, "| веса:", os.path.join(args.ckpt_dir, "net_final.pt"))
+    print("Готово. TB:", logdir, "| веса:", os.path.join(args.ckpt_dir, "net_final.pt"))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,12 @@ uv run tensorboard --logdir runs/narды          # loss, длина парти�
 # (JSON позиций: points + bar/home + turn) — можно скриптом превратить в картинку/видео.
 
 # Чекпоинты: checkpoints/net_<epoch>.pt и net_final.pt.
+# Продолжить обучение (не с нуля!) + TB отдельным run'ом:
+uv run python train.py --resume --epochs 500 --tblog runs/narды
+
+# Сыграть с агентом (человек vs модель, greedy):
+uv run python play.py --ckpt checkpoints/net_final.pt --side black
+
 ```
 
 Хочешь посмотреть, как агент улучшается за время — открываешь TensorBoard
