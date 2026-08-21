@@ -32,7 +32,7 @@ from core.board import Position
 from core.game import _apply_step, _single_moves, apply_move, is_terminal, legal_moves
 from core.rolls import roll  # честный бросок
 
-app = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static", static_url_path="")
 
 # ── метаданные «соперника» ──
 CKPT = "checkpoints/net_final.pt"
