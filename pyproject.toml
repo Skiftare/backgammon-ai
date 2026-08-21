@@ -1,12 +1,13 @@
 [project]
 name = "backgammon-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "Narды-агент: детерминированная среда + value-сеть (TD-Gammon-стиль), обучение TD(λ)/backprop, следом predictive-coding (PC/EP)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.6",
     "pytest>=9.1.1",
+    "torch>=2.13.0",
 ]
 
 [dependency-groups]
