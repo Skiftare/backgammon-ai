@@ -45,7 +45,7 @@ def choose_greedy(pos: Position, roll, net: ValueNet, encoder: Encoder) -> Posit
     for m in moves:
         nxt = apply_move(pos, m)
         x = torch.tensor(encoder.encode(nxt), dtype=torch.float32).unsqueeze(0)
-        v = float(net.value(x))
+        v = float(net.value(x).detach())
         # value оценивается «со стороны ходящего следующего»; текущий игрок хочет
         # позицию, выгодную себе, т.е. для белого — максимум value (после хода ходит
         # чёрный, но value всегда «со стороны ходящего», так НЕ знак не ставим —
