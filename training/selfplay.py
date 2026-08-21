@@ -14,6 +14,8 @@ from typing import Optional
 
 import random
 
+import torch
+
 from core.board import Position, TOTAL_CHECKERS
 from core.engine import legal_moves, apply_move
 from core.features import Encoder
@@ -42,7 +44,8 @@ def choose_greedy(pos: Position, roll, net: ValueNet, encoder: Encoder) -> Posit
     best_v: Optional[float] = None
     for m in moves:
         nxt = apply_move(pos, m)
-        v = float(net.value(encoder.encode(nxt)))
+        x = torch.tensor(encoder.encode(nxt), dtype=torch.float32).unsqueeze(0)
+        v = float(net.value(x))
         # value оценивается «со стороны ходящего следующего»; текущий игрок хочет
         # позицию, выгодную себе, т.е. для белого — максимум value (после хода ходит
         # чёрный, но value всегда «со стороны ходящего», так НЕ знак не ставим —
