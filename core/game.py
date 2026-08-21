@@ -100,14 +100,12 @@ def _apply_step(pos: Position, step: STEP) -> Position:
         bar_me -= 1
         if to < 0 or to >= N_POINTS:
             raise ValueError("вход с бара вне доски")
-        if own_at(to) == 0:
-            # блот соперника
-            if d == 1 and pts[to] == -1:
-                bar_opp += 1
-                pts[to] = 0
-            elif d == -1 and pts[to] == 1:
-                bar_opp += 1
-                pts[to] = 0
+        if d == 1 and pts[to] == -1:
+            bar_opp += 1
+            pts[to] = 0
+        elif d == -1 and pts[to] == 1:
+            bar_opp += 1
+            pts[to] = 0
         set_own(to, +1)
     elif to == OFF:
         if _all_in_home(pos) is False:
@@ -155,25 +153,24 @@ def _single_moves(pos: Position, step: int) -> List[STEP]:
         if _own(pos, p) <= 0:
             continue
         tgt = p + d * step
-        # вынос: только когда все фишки в доме и текущая точка p в доме;
-        # по правилу: кость n выносит с точки, чей номинал (расстояние до дома) <= n,
-        # и на всех точках ближе к дому (q в доме с большим номиналом) фишек нет
-        # (иначе старшие должны быть тронуты первыми / нельзя перепрыгнуть).
+        # вынос: только когда все фишки в доме и p в доме.
+        # Правило: кость n выносит точку p, если её номинал <= n, И на всех точках
+        # с номиналом > n нет своих фишек (иначе должен играть старшую).
         if (tgt >= N_POINTS) if d == 1 else (tgt < 0):
             if _all_in_home(pos) and _home(pos.turn, p):
-                # номинал точки для белого: (24-p); для чёрного: (p+1)
                 nominal = (24 - p) if d == 1 else (p + 1)
                 if step >= nominal:
-                    # нет фишек на точках с бόльшим номиналом (ближе к дому)
-                    closer_occupied = False
+                    blocked = False
                     for q in range(N_POINTS):
-                        if q == p or not _own(pos, q):
+                        if q == p:
                             continue
-                        if d == 1 and _home(pos.turn, q) and (24 - q) > nominal:
-                            closer_occupied = True
-                        if d == -1 and _home(pos.turn, q) and (q + 1) > nominal:
-                            closer_occupied = True
-                    if not closer_occupied:
+                        if _own(pos, q) <= 0:
+                            continue
+                        q_nom = (24 - q) if d == 1 else (q + 1)
+                        if _home(pos.turn, q) and q_nom > nominal:
+                            blocked = True
+                            break
+                    if not blocked:
                         out.append((p, OFF))
         elif 0 <= tgt < N_POINTS and _landable(pos, tgt):
             out.append((p, tgt))
