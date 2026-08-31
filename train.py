@@ -46,12 +46,18 @@ def _last_ckpt(ckpt_dir: str) -> str | None:
         return None
     cands = []
     for f in os.listdir(ckpt_dir):
-        if f.startswith("net_") and f.endswith(".pt") and f != "net_final.pt":
+        if f.startswith("net_") and f.endswith(".pt"):
+            if f == "net_final.pt":
+                continue
             try:
                 cands.append((int(f[4:-3]), os.path.join(ckpt_dir, f)))
             except ValueError:
                 pass
     if not cands:
+        # нет номерных — попробуем net_final.pt (режим «доучи ещё N раундов»)
+        fin = os.path.join(ckpt_dir, "net_final.pt")
+        if os.path.exists(fin):
+            return fin
         return None
     cands.sort(key=lambda x: x[0])
     return cands[-1][1]
@@ -71,10 +77,29 @@ def save_replay(traj, winner, out_dir: str, step: int) -> str:
     return path
 
 
+def _port_busy(host: str, port: int) -> bool:
+    """Проверить, отвечает ли уже что-то на host:port (TB уже запущен)."""
+    import socket
+
+    check_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    try:
+        with socket.create_connection((check_host, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
 def _start_tensorboard(logdir: str, host: str, port: int):
-    """Авто-запуск tensorboard в фоне, привязанный к host:port."""
+    """Авто-запуск tensorboard на РОДИТЕЛЬСКИЙ logdir (видит все run'ы).
+
+    Если на порте уже крутится TB — не дублируем, просто сообщаем.
+    """
+    print(f"[tb] http://{host}:{port}  (logdir: {os.path.abspath(logdir)})", flush=True)
     if not _HAS_TB:
-        print("[tb] нет tensorboard — лог в консоль", flush=True)
+        print("[tb] tensorboard недоступен — лог в консоль", flush=True)
+        return
+    if _port_busy(host, port):
+        print("[tb] уже запущен на этом порту — использую его", flush=True)
         return
     try:
         flags = [sys.executable, "-m", "tensorboard.main", "--logdir", logdir,
@@ -82,7 +107,7 @@ def _start_tensorboard(logdir: str, host: str, port: int):
         creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         subprocess.Popen(flags, creationflags=creation,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"[tb] TensorBoard запущен на http://{host}:{port}", flush=True)
+        print("[tb] TensorBoard запущен (фоновый процесс)", flush=True)
     except Exception as e:
         print(f"[tb] не удалось запустить tensorboard: {e}", flush=True)
 
@@ -131,8 +156,9 @@ def main() -> None:
         if last is None:
             print("Нет чекпоинта — стартую с нуля.", flush=True)
         else:
+            fin = os.path.basename(last)
             net.load_state_dict(torch.load(last, map_location="cpu"))
-            start_step = int(os.path.basename(last)[4:-3])
+            start_step = 0 if fin == "net_final.pt" else int(fin[4:-3])
             print(f"Resume: {last} (продолжаю с шага {start_step})", flush=True)
 
     tag = args.run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -140,7 +166,7 @@ def main() -> None:
     writer = SummaryWriter(logdir) if _HAS_TB else None
     repl_dir = os.path.join(logdir, "replays")
 
-    _start_tensorboard(logdir, args.host, args.tb_port)
+    _start_tensorboard(args.tblog, args.host, args.tb_port)
     print(f"[run] logdir={logdir} | ckpt={args.ckpt_dir}", flush=True)
 
     last_replay = time.time()
