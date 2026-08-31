@@ -25,7 +25,11 @@ def _other(turn: str) -> str:
 
 
 def choose_greedy(pos: Position, roll, net: ValueNet, encoder: Encoder) -> Position:
-    """Применить лучший ход greedy по value (для текущего игрока)."""
+    """Применить лучший ход greedy по value (для текущего игрока).
+
+    Все кандидаты оцениваются ОДНИМ батч-forward'ом (net.value(X) на K кандидатах)
+    — это догружает GPU/CPU вместо K отдельных вызовов маленьких тензоров.
+    """
     moves = legal_moves(pos, roll)
     if not moves:
         # хода нет — смена стороны (фишки не трогаем)
@@ -38,24 +42,14 @@ def choose_greedy(pos: Position, roll, net: ValueNet, encoder: Encoder) -> Posit
             turn=_other(pos.turn),
         )
 
-    best: Position | None = None
-    best_v: float | None = None
+    nxts = [apply_move(pos, m) for m in moves]
     dev = next(net.parameters()).device
-    for m in moves:
-        nxt = apply_move(pos, m)
-        x = torch.tensor(encoder.encode(nxt), dtype=torch.float32).unsqueeze(0).to(dev)
-        v = float(net.value(x).detach())
-        # value оценивается «со стороны ходящего следующего»; текущий игрок хочет
-        # позицию, выгодную себе, т.е. для белого — максимум value (после хода ходит
-        # чёрный, но value всегда «со стороны ходящего», так НЕ знак не ставим —
-        # эвристика: белый себе хочет большой value следующей позиции; чёрный — малый).
-        if pos.turn == "white":
-            if best is None or v > best_v:
-                best, best_v = nxt, v
-        else:
-            if best is None or v < best_v:
-                best, best_v = nxt, v
-    return best if best is not None else pos
+    X = torch.stack([torch.tensor(encoder.encode(p), dtype=torch.float32) for p in nxts]).to(dev)
+    with torch.no_grad():
+        V = net.value(X)  # (K,) value «для ходящего» следующей позиции
+    # белый хочет максимум value, чёрный — минимум (как в трэин-логике td.py)
+    idx = int(torch.argmax(V)) if pos.turn == "white" else int(torch.argmin(V))
+    return nxts[idx]
 
 
 def play_one_game(net: ValueNet, encoder: Encoder, rng=None, max_steps: int = 1000):
@@ -98,7 +92,10 @@ def play_many_games(net: ValueNet, encoder: Encoder, n: int, seed_base: int = 0,
 
 
 def _play_worker(cfg: dict):
-    """Воркер для ProcessPoolExecutor (Windows-spawn безопасен: всё сериализуемо)."""
+    """Воркер для ProcessPoolExecutor (Windows-spawn безопасен: всё сериализуемо).
+
+    Грузит CPU-копию сети из байтов и генерит cfg['n'] партий.
+    """
     import io
 
     import torch
@@ -111,6 +108,32 @@ def _play_worker(cfg: dict):
     net.eval()
     enc = Encoder()
     return play_many_games(net, enc, cfg["n"], seed_base=cfg["seed_base"], max_steps=cfg["max_steps"])
+
+
+def build_worker_cfgs(net: ValueNet, batch: int, workers: int, seed_base: int,
+                      max_steps: int = 1000) -> list[dict]:
+    """Собрать конфиги для параллельной генерации `batch` партий на `workers` ядер."""
+    import io
+
+    import torch
+
+    # hidden = ширина первого скрытого слоя
+    hidden = next(m.out_features for m in net.modules() if isinstance(m, torch.nn.Linear))
+    sd = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+    buf = io.BytesIO()
+    torch.save(sd, buf)
+    in_dim = next(m.in_features for m in net.modules() if isinstance(m, torch.nn.Linear))
+
+    per = max(1, batch // workers)
+    cfgs = []
+    for w in range(workers):
+        n = per if w < workers - 1 else batch - per * (workers - 1)
+        cfgs.append({
+            "in_dim": in_dim, "hidden": hidden, "n": n,
+            "seed_base": seed_base + w * 7919,
+            "max_steps": max_steps, "state_bytes": buf.getvalue(),
+        })
+    return cfgs
 
 
 def play_parallel(net: ValueNet, encoder: Encoder, n: int, workers: int,
