@@ -27,15 +27,15 @@ STEP = tuple[int, int]  # (from_label, to_label): -1 = bar, 99 = off, иначе
 
 
 def _dir(turn: str) -> int:
-    return 1 if turn == "white" else -1
+    # ВСТРЕЧНОЕ движение: белые идут вниз (к своему дому 0..5 = №1..6),
+    # красные идут вверх (к своему дому 18..23 = №19..24). Зеркально старому.
+    return -1 if turn == "white" else 1
 
 
 def _own(pos: Position, p: int) -> int:
     """Число фишек текущего игрока на точке p (положительное)."""
     v = pos.points[p]
-    if _dir(pos.turn) == 1:
-        return max(0, v)
-    return -v if v < 0 else 0
+    return max(0, v) if pos.turn == "white" else (-v if v < 0 else 0)
 
 
 def _bar(pos: Position) -> int:
@@ -43,28 +43,34 @@ def _bar(pos: Position) -> int:
 
 
 def _landable(pos: Position, p: int) -> bool:
-    """Можно ли встать на точку p (не закрыта соперником)."""
+    """Можно ли встать на точку p (не закрыта соперником).
+
+    Белые хранятся как +, красные как -. Точка закрыта если у соперника >=2 фишек:
+    белым нельзя на pts<=-2, красным нельзя на pts>=2.
+    """
     v = pos.points[p]
-    d = _dir(pos.turn)
-    return (v >= -1) if d == 1 else (v <= 1)
+    return (v >= -1) if pos.turn == "white" else (v <= 1)
 
 
 def _entry_point(turn: str, step: int) -> int:
-    return 23 - (step - 1) if turn == "white" else step - 1
+    # Вход с бара — на ПРОТИВОПОЛОЖНУЮ сторону от своего дома (в дом соперника).
+    # Белые (дом низ, №1-6) входят высоко: №25-step = точка 24-step.
+    # Красные (дом верх, №19-24) входят низко: №step = точка step-1.
+    return (24 - step) if turn == "white" else (step - 1)
 
 
 def _home(turn: str, p: int) -> bool:
-    return (18 <= p <= 23) if turn == "white" else (0 <= p <= 5)
+    # дом белых — низ (№1..6 = индекс 0..5), дом красных — верх (№19..24 = индекс 18..23)
+    return (0 <= p <= 5) if turn == "white" else (18 <= p <= 23)
 
 
 def _all_in_home(pos: Position) -> bool:
     if _bar(pos) > 0:
         return False
-    d = _dir(pos.turn)
     for p, v in enumerate(pos.points):
-        if d == 1 and v > 0 and not _home(pos.turn, p):
+        if pos.turn == "white" and v > 0 and not _home("white", p):
             return False
-        if d == -1 and v < 0 and not _home(pos.turn, p):
+        if pos.turn == "black" and v < 0 and not _home("black", p):
             return False
     return True
 
@@ -82,13 +88,11 @@ def _apply_step(pos: Position, step: STEP) -> Position:
     home_opp = pos.home_black if pos.turn == "white" else pos.home_white
 
     def set_own(p: int, delta: int) -> None:
-        if d == 1:
-            pts[p] += delta
-        else:
-            pts[p] -= delta
+        # белые хранятся как +n, красные как -n (знак постоянен).
+        pts[p] += (delta if pos.turn == "white" else -delta)
 
     def own_at(p: int) -> int:
-        return pts[p] if d == 1 else -pts[p]
+        return pts[p] if pos.turn == "white" else -pts[p]
 
     if fr == BAR:
         if bar_me <= 0:
@@ -96,7 +100,8 @@ def _apply_step(pos: Position, step: STEP) -> Position:
         bar_me -= 1
         if to < 0 or to >= N_POINTS:
             raise ValueError("вход с бара вне доски")
-        if d == 1 and pts[to] == -1 or d == -1 and pts[to] == 1:
+        opp_blot = (pts[to] == -1) if pos.turn == "white" else (pts[to] == 1)
+        if opp_blot:
             bar_opp += 1
             pts[to] = 0
         set_own(to, +1)
@@ -113,7 +118,8 @@ def _apply_step(pos: Position, step: STEP) -> Position:
         if own_at(fr) <= 0:
             raise ValueError("нет фишки на source")
         # если на to блот соперника — бить
-        if d == 1 and pts[to] == -1 or d == -1 and pts[to] == 1:
+        opp_blot = (pts[to] == -1) if pos.turn == "white" else (pts[to] == 1)
+        if opp_blot:
             bar_opp += 1
             pts[to] = 0
         set_own(fr, -1)
@@ -138,30 +144,31 @@ def _single_moves(pos: Position, step: int) -> list[STEP]:
         if _landable(pos, p):
             out.append((BAR, p))
         return out  # при фишках на баре — только вход
-    d = _dir(pos.turn)
+    d = _dir(pos.turn)  # белые -1 (вниз), красные +1 (вверх)
+
+    def nominal(p: int) -> int:
+        return (p + 1) if d == -1 else (24 - p)
+
+    all_home = _all_in_home(pos)
+    # высший занятый дом-столбец (номинал) — для правила «кость > высшего»
+    highest = None
+    if all_home:
+        h = [nominal(p) for p in range(N_POINTS) if _home(pos.turn, p) and _own(pos, p) > 0]
+        highest = max(h) if h else None
+
     for p in range(N_POINTS):
         if _own(pos, p) <= 0:
             continue
         tgt = p + d * step
-        # вынос: только когда все фишки в доме и p в доме.
-        # Правило: кость n выносит точку p, если её номинал <= n, И на всех точках
-        # с номиналом > n нет своих фишек (иначе должен играть старшую).
-        if (tgt >= N_POINTS) if d == 1 else (tgt < 0):
-            if _all_in_home(pos) and _home(pos.turn, p):
-                nominal = (24 - p) if d == 1 else (p + 1)
-                if step >= nominal:
-                    blocked = False
-                    for q in range(N_POINTS):
-                        if q == p:
-                            continue
-                        if _own(pos, q) <= 0:
-                            continue
-                        q_nom = (24 - q) if d == 1 else (q + 1)
-                        if _home(pos.turn, q) and q_nom > nominal:
-                            blocked = True
-                            break
-                    if not blocked:
-                        out.append((p, OFF))
+        # вынос (стандартные правила):
+        #  - точное совпадение (кость == номинал столбца) — всегда можно выбросить;
+        #  - иначе только с ВЫСШЕГО занятого столбца, и только когда кость >= его номинала
+        #    (т.е. выше него пусто).
+        if (tgt < 0) if d == -1 else (tgt >= N_POINTS):
+            if all_home and _home(pos.turn, p):
+                nom = nominal(p)
+                if step == nom or (nom == highest and step >= nom):
+                    out.append((p, OFF))
         elif 0 <= tgt < N_POINTS and _landable(pos, tgt):
             out.append((p, tgt))
     return out
