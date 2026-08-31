@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-"""Запуск обучения агента нард (self-play + TD(λ)) с мониторингом.
+"""Запуск обучения агента нард (self-play + TD(λ)) с авто-мониторингом.
 
-Ключевые фичи для практики:
-- **продолжение обучения**: `--resume` грузит последний чекпоинт и продолжает
-  TensorBoard с реального шага (кривые не начинаются заново);
-- **отдельный run на каждый запуск**: по умолчанию логдир = `<tblog>/<дата_время>`,
-  так что разные запуски не смешиваются и TB показывает ровно один прогон;
-- **чекпоинты** каждые `--save-every` + `net_final.pt`.
+Одной командой запускает обучение, само поднимает TensorBoard на заданном
+host:port, и грузит видеокарту (CUDA), если она есть. Параллелизм: на GPU —
+batch по партиям через train_batch; на CPU (без GPU) — параллельная генерация
+партий через --workers процессов.
 
 Использование:
-    uv run python train.py --epochs 1000 --tblog runs/narды          # новый прогон
-    uv run python train.py --resume --epochs 500 --tblog runs/narды  # продолжить
-    uv run tensorboard --logdir runs/narды
+    uv run python train.py --epochs 5000 --host 0.0.0.0 --device cuda
+    uv run python train.py --epochs 2000 --device cpu --workers 4
+    uv run python train.py --resume --epochs 500
 """
 
 from __future__ import annotations
@@ -20,16 +18,17 @@ import argparse
 import json
 import os
 import random
+import subprocess
+import sys
 import time
 from datetime import datetime
 
 import torch
 
-from core.board import Position  # noqa: F401  (для читаемости реплея)
 from core.features import Encoder
 from model.net import make_value_net
-from training.selfplay import play_one_game
-from training.td import train_episode
+from training.selfplay import play_many_games, play_parallel
+from training.td import train_batch
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -43,7 +42,6 @@ def _mean(xs):
 
 
 def _last_ckpt(ckpt_dir: str) -> str | None:
-    """Путь к чекпоинту с максимальным номером эпохи, либо None."""
     if not os.path.isdir(ckpt_dir):
         return None
     cands = []
@@ -73,6 +71,22 @@ def save_replay(traj, winner, out_dir: str, step: int) -> str:
     return path
 
 
+def _start_tensorboard(logdir: str, host: str, port: int):
+    """Авто-запуск tensorboard в фоне, привязанный к host:port."""
+    if not _HAS_TB:
+        print("[tb] нет tensorboard — лог в консоль", flush=True)
+        return
+    try:
+        flags = [sys.executable, "-m", "tensorboard.main", "--logdir", logdir,
+                 "--host", host, "--port", str(port)]
+        creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(flags, creationflags=creation,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"[tb] TensorBoard запущен на http://{host}:{port}", flush=True)
+    except Exception as e:
+        print(f"[tb] не удалось запустить tensorboard: {e}", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=500)
@@ -85,15 +99,30 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=100)
     ap.add_argument("--replay-every-min", type=float, default=5.0)
     ap.add_argument("--max-steps", type=int, default=500)
-    ap.add_argument("--resume", action="store_true", help="грузить последний чекпоинт и продолжить")
+    ap.add_argument("--batch", type=int, default=1,
+                    help="партий на один шаг обучения (GPU-параллелизм)")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="процессы для генерации партий на CPU (0=в потоке)")
+    ap.add_argument("--device", default=None,
+                    help="auto/cpu/cuda (по умолчанию cuda, если доступна)")
+    ap.add_argument("--host", default="127.0.0.1", help="адрес привязки TB (0.0.0.0 = сеть)")
+    ap.add_argument("--tb-port", type=int, default=6006, help="порт TensorBoard")
+    ap.add_argument("--resume", action="store_true", help="грузить последний чекпоинт")
     ap.add_argument("--run-tag", default=None, help="метка запуска (по умолчанию дата_время)")
     args = ap.parse_args()
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "auto" or args.device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[dev] device={device} | cuda={torch.cuda.is_available()} "
+          f"({torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-'})", flush=True)
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     enc = Encoder()
     net = make_value_net(enc.dim(), hidden=args.hidden)
     net.train()
+    net.to(device)
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
     start_step = 0
@@ -106,56 +135,73 @@ def main() -> None:
             start_step = int(os.path.basename(last)[4:-3])
             print(f"Resume: {last} (продолжаю с шага {start_step})", flush=True)
 
-    # уникальный run-директорий на запуск, чтобы TB не мешал запуски
     tag = args.run_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
     logdir = os.path.join(args.tblog, tag)
     writer = SummaryWriter(logdir) if _HAS_TB else None
     repl_dir = os.path.join(logdir, "replays")
 
-    print(f"TB: {'yes' if writer else 'no'} | logdir: {logdir}", flush=True)
-    last_replay = time.time()
+    _start_tensorboard(logdir, args.host, args.tb_port)
+    print(f"[run] logdir={logdir} | ckpt={args.ckpt_dir}", flush=True)
 
+    last_replay = time.time()
     W = 100
     wins, lens, rewards, losses = [], [], [], []
+    n_played = 0
+
     for epoch in range(1, args.epochs + 1):
         step = start_step + epoch
-        rng = random.Random(args.seed + step)
-        traj, winner = play_one_game(net, enc, rng=rng, max_steps=args.max_steps)
-        loss = train_episode(net, enc, traj, winner, lam=args.lam, lr=args.lr)
+        batch = max(1, args.batch)
 
-        win = 1.0 if winner == "white" else 0.0
-        reward = 1.0 if winner == "white" else -1.0
+        if device == "cuda" or args.workers == 0:
+            games = play_many_games(net, enc, batch, seed_base=args.seed * 1000 + step,
+                                    max_steps=args.max_steps)
+        else:
+            games = play_parallel(net, enc, batch, workers=args.workers,
+                                  seed_base=args.seed * 1000 + step, max_steps=args.max_steps)
+        n_played += len(games)
+
+        loss = train_batch(net, enc, games, lam=args.lam, lr=args.lr, device=device)
+
+        winners = [g[1] for g in games]
+        win = sum(1.0 if w == "white" else 0.0 for w in winners) / len(winners)
+        lens_this = [len(g[0]) for g in games]
         with torch.no_grad():
-            ss = traj[:: max(1, len(traj) // 50)]
-            Xs = torch.stack([torch.tensor(enc.encode(p), dtype=torch.float32) for p in ss])
-            mv = float(net.value(Xs).mean())
+            mv = 0.0
+            cnt = 0
+            for traj, _ in games:
+                ss = traj[:: max(1, len(traj) // 50)]
+                Xs = torch.stack([torch.tensor(enc.encode(p), dtype=torch.float32) for p in ss]).to(device)
+                mv += float(net.value(Xs).mean())
+                cnt += 1
+            mv = mv / max(1, cnt)
 
-        losses.append(float(loss)); wins.append(win); lens.append(len(traj)); rewards.append(reward)
+        losses.append(float(loss)); wins.append(win); lens.extend(lens_this); rewards.append(win * 2 - 1)
         if len(wins) > W:
-            losses.pop(0); wins.pop(0); lens.pop(0); rewards.pop(0)
+            losses.pop(0); wins.pop(0); rewards.pop(0)
+        lens = lens[-W:]
 
         log = {
             "loss": float(loss),
             "loss_ema": _mean(losses),
             "winrate": _mean(wins),
             "mean_value": mv,
-            "game_len": len(traj),
-            "game_len_avg": _mean(lens),
-            "reward": reward,
+            "game_len": _mean(lens_this),
             "reward_avg": _mean(rewards),
             "win_white": win,
             "win_black": 1.0 - win,
+            "games_total": n_played,
         }
         if writer is not None:
             for k, v in log.items():
                 writer.add_scalar(f"train/{k}", v, step)
         else:
             if epoch % 20 == 0 or epoch == 1:
-                print(f"step {step} | loss {float(loss):.4f} | wr {_mean(wins):.2f} | len {len(traj):3d}", flush=True)
+                print(f"step {step} | loss {float(loss):.4f} | wr {_mean(wins):.2f} | len {int(_mean(lens_this)):3d}", flush=True)
 
         if time.time() - last_replay >= args.replay_every_min * 60:
             last_replay = time.time()
-            print("[replay]", save_replay(traj, winner, repl_dir, step), flush=True)
+            for traj, winner in games[:1]:
+                print("[replay]", save_replay(traj, winner, repl_dir, step), flush=True)
 
         if step % args.save_every == 0:
             p = os.path.join(args.ckpt_dir, f"net_{step}.pt")
@@ -163,7 +209,7 @@ def main() -> None:
             print(f"[ckpt] {p}", flush=True)
 
     torch.save(net.state_dict(), os.path.join(args.ckpt_dir, "net_final.pt"))
-    print("Готово. TB:", logdir, "| веса:", os.path.join(args.ckpt_dir, "net_final.pt"))
+    print("Готово. TB:", logdir, "| веса:", os.path.join(args.ckpt_dir, "net_final.pt"), flush=True)
 
 
 if __name__ == "__main__":

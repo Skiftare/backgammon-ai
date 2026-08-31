@@ -84,3 +84,70 @@ def play_one_game(net: ValueNet, encoder: Encoder, rng=None, max_steps: int = 10
 
     winner = "white" if pos.home_white >= pos.home_black else "black"
     return traj, winner
+
+
+def play_many_games(net: ValueNet, encoder: Encoder, n: int, seed_base: int = 0, max_steps: int = 1000):
+    """Последовательно сыграть n партий (для GPU/одиночного потока)."""
+    games = []
+    for i in range(n):
+        rng = random.Random(seed_base + i)
+        traj, winner = play_one_game(net, encoder, rng=rng, max_steps=max_steps)
+        games.append((list(traj), winner))
+    return games
+
+
+def _play_worker(cfg: dict):
+    """Воркер для ProcessPoolExecutor (Windows-spawn безопасен: всё сериализуемо)."""
+    import io
+
+    import torch
+
+    from model.net import make_value_net
+
+    net = make_value_net(cfg["in_dim"], hidden=cfg["hidden"])
+    buf = io.BytesIO(cfg["state_bytes"])
+    net.load_state_dict(torch.load(buf, map_location="cpu"))
+    net.eval()
+    enc = Encoder()
+    return play_many_games(net, enc, cfg["n"], seed_base=cfg["seed_base"], max_steps=cfg["max_steps"])
+
+
+def play_parallel(net: ValueNet, encoder: Encoder, n: int, workers: int,
+                  seed_base: int = 0, max_steps: int = 1000):
+    """Параллельная генерация партий через процессы (для CPU-машины без GPU).
+
+    Сериализует веса в байты и раскидывает по воркерам; возвращает список
+    кортежей (траектория, победитель) — пригодный для train_batch.
+    """
+    import io
+
+    import torch
+    from concurrent.futures import ProcessPoolExecutor
+
+    buf = io.BytesIO()
+    torch.save(net.state_dict(), buf)
+
+    games: list[tuple[list, str]] = []
+    # hidden = ширина первого скрытого слоя
+    hidden = None
+    for mod in net.modules():
+        if isinstance(mod, torch.nn.Linear):
+            hidden = mod.out_features
+            break
+    cfg_base = {
+        "in_dim": encoder.dim(),
+        "hidden": hidden,
+        "max_steps": max_steps,
+        "state_bytes": buf.getvalue(),
+    }
+
+    per = max(1, n // workers)
+    tasks = []
+    for w in range(workers):
+        cfg = dict(cfg_base, n=per, seed_base=seed_base + w * 7919)
+        tasks.append(cfg)
+
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        for res in ex.map(_play_worker, tasks):
+            games.extend(res)
+    return games[:n]

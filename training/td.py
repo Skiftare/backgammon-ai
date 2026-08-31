@@ -63,3 +63,43 @@ def train_episode(
     loss.backward()
     optimizer.step()
     return float(loss.item())
+
+
+def train_batch(
+    net: ValueNet,
+    encoder: Encoder,
+    games: Sequence[tuple[Sequence[Position], str]],
+    lam: float = 0.7,
+    gamma: float = 1.0,
+    lr: float = 1e-3,
+    device: str = "cpu",
+) -> float:
+    """Один шаг по батчу партий (каждая как в train_episode), градиенты суммируются.
+
+    `games` — список кортежей (траектория, победитель). Весь батч проходит одним
+    backward — это и есть распараллеливание через GPU (одна большая партия тензоров).
+    """
+    net.to(device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr)
+    optimizer.zero_grad()
+
+    total = torch.zeros((), dtype=torch.float32, device=device)
+    for traj, winner in games:
+        Xs = torch.stack([torch.tensor(encoder.encode(p), dtype=torch.float32) for p in traj]).to(device)
+        V = net.value(Xs)
+        T = len(traj)
+        r_t = torch.zeros(T, dtype=torch.float32, device=device)
+        r_t[-1] = SIGNS[winner]
+
+        deltas = []
+        v_next = torch.zeros((), dtype=torch.float32, device=device)
+        for t in range(T - 1, -1, -1):
+            delta = r_t[t] + gamma * (-v_next) - V[t]
+            deltas.append(delta)
+            v_next = V[t]
+        total = total + torch.stack(deltas).pow(2).mean()
+
+    loss = total / max(1, len(games))
+    loss.backward()
+    optimizer.step()
+    return float(loss.item())
