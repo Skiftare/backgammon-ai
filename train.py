@@ -21,14 +21,17 @@ import random
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 
 import torch
 
+import numpy as np
+
 from core.features import Encoder
 from model.net import make_value_net
-from training.selfplay import simulate_games_batched
-from training.td import train_batch
+from training.selfplay import build_worker_cfgs, _play_worker
+from training.td import ValueTrainer
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -131,6 +134,8 @@ def main() -> None:
                     help="партий на шаг (>=1 партии, генерация батчем на устройстве)")
     ap.add_argument("--eps", type=float, default=0.1,
                     help="вероятность случайного хода в самоплее (exploration, снимает травоядность)")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="процессов генерации партий (0 = все ядра)")
     ap.add_argument("--device", default=None,
                     help="auto/cpu/cuda (по умолчанию cuda, если доступна)")
     ap.add_argument("--host", default="127.0.0.1", help="адрес привязки TB (0.0.0.0 = сеть)")
@@ -171,24 +176,41 @@ def main() -> None:
 
     _start_tensorboard(args.tblog, args.host, args.tb_port)
     print(f"[run] logdir={logdir} | ckpt={args.ckpt_dir}", flush=True)
-    print(f"[par] генерация: батч-симуляция ({args.batch} партий/раз) на {device} | eps={args.eps}", flush=True)
+
+    workers = args.workers or max(1, os.cpu_count() or 4)
+    trainer = ValueTrainer(net, lr=args.lr, device=device, fp16=True)
+    print(f"[par] {workers} воркеров генерят партии | батч {args.batch} | eps {args.eps} | "
+          f"fp16={trainer.fp16} | устройство обучения: {device}", flush=True)
 
     last_replay = time.time()
     W = 100
     wins, lens, rewards, losses = [], [], [], []
     n_played = 0
 
+    # Конвейер: воркеры (все ядра) генерят следующий батч, ПОКА GPU учит текущий —
+    # устройство не простаивает, генерация и обучение перекрываются.
+    pool = ProcessPoolExecutor(max_workers=workers)
+
+    def _submit(step):
+        cfgs = build_worker_cfgs(net, args.batch, workers,
+                                 args.seed * 1000 + step, args.max_steps, args.eps)
+        return [pool.submit(_play_worker, c) for c in cfgs]
+
+    futures = _submit(start_step + 1)
+
     for epoch in range(1, args.epochs + 1):
         step = start_step + epoch
 
-        # батченная генерация партий прямо на устройстве: кандидаты всех партий
-        # кодируются в один тензор и оцениваются одним large-batch forward.
-        games = simulate_games_batched(net, enc, args.batch, device=device,
-                                       seed_base=args.seed * 1000 + step,
-                                       max_steps=args.max_steps, eps=args.eps)
+        games = []
+        for f in futures:
+            games.extend(f.result())
         n_played += len(games)
 
-        loss = train_batch(net, enc, games, lam=args.lam, lr=args.lr, device=device)
+        # сразу запускаем генерацию следующего батча (пока ниже обучаемся)
+        if epoch < args.epochs:
+            futures = _submit(step + 1)
+
+        loss = trainer.step(games, enc, lam=args.lam)
 
         winners = [g[1] for g in games]
         win = sum(1.0 if w == "white" else 0.0 for w in winners) / len(winners)
@@ -198,7 +220,7 @@ def main() -> None:
             cnt = 0
             for traj, _ in games:
                 ss = traj[:: max(1, len(traj) // 50)]
-                Xs = torch.stack([torch.tensor(enc.encode(p), dtype=torch.float32) for p in ss]).to(device)
+                Xs = torch.tensor(np.array([enc.encode(p) for p in ss]), dtype=torch.float32, device=device)
                 mv += float(net.value(Xs).mean())
                 cnt += 1
             mv = mv / max(1, cnt)
@@ -236,6 +258,7 @@ def main() -> None:
             torch.save(net.state_dict(), p)
             print(f"[ckpt] {p}", flush=True)
 
+    pool.shutdown(cancel_futures=True)
     torch.save(net.state_dict(), os.path.join(args.ckpt_dir, "net_final.pt"))
     print("Готово. TB:", logdir, "| веса:", os.path.join(args.ckpt_dir, "net_final.pt"), flush=True)
 

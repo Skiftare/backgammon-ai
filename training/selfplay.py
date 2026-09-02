@@ -92,9 +92,8 @@ def play_many_games(net: ValueNet, encoder: Encoder, n: int, seed_base: int = 0,
 
 
 def _play_worker(cfg: dict):
-    """Воркер для ProcessPoolExecutor (Windows-spawn безопасен: всё сериализуемо).
-
-    Грузит CPU-копию сети из байтов и генерит cfg['n'] партий.
+    """Воркер для ProcessPoolExecutor: грузит CPU-копию сети и генерит n партий
+    с батченной оценкой кандидатов (simulate_games_batched) — векторно, быстро.
     """
     import io
 
@@ -102,23 +101,28 @@ def _play_worker(cfg: dict):
 
     from model.net import make_value_net
 
-    net = make_value_net(cfg["in_dim"], hidden=cfg["hidden"])
+    net = make_value_net(cfg["in_dim"], hidden=cfg["hidden"], layers=cfg["layers"])
     buf = io.BytesIO(cfg["state_bytes"])
     net.load_state_dict(torch.load(buf, map_location="cpu"))
     net.eval()
     enc = Encoder()
-    return play_many_games(net, enc, cfg["n"], seed_base=cfg["seed_base"], max_steps=cfg["max_steps"])
+    return simulate_games_batched(
+        net, enc, cfg["n"], device="cpu",
+        seed_base=cfg["seed_base"], max_steps=cfg["max_steps"], eps=cfg["eps"],
+    )
 
 
 def build_worker_cfgs(net: ValueNet, batch: int, workers: int, seed_base: int,
-                      max_steps: int = 1000) -> list[dict]:
+                      max_steps: int = 1000, eps: float = 0.0) -> list[dict]:
     """Собрать конфиги для параллельной генерации `batch` партий на `workers` ядер."""
     import io
 
     import torch
 
-    # hidden = ширина первого скрытого слоя
-    hidden = next(m.out_features for m in net.modules() if isinstance(m, torch.nn.Linear))
+    # hidden = ширина первого скрытого слоя, layers = число скрытых слоёв
+    lin = [m for m in net.modules() if isinstance(m, torch.nn.Linear)]
+    hidden = lin[0].out_features if lin else 512
+    layers = len(lin) - 1 if lin else 2
     sd = {k: v.detach().cpu() for k, v in net.state_dict().items()}
     buf = io.BytesIO()
     torch.save(sd, buf)
@@ -129,9 +133,9 @@ def build_worker_cfgs(net: ValueNet, batch: int, workers: int, seed_base: int,
     for w in range(workers):
         n = per if w < workers - 1 else batch - per * (workers - 1)
         cfgs.append({
-            "in_dim": in_dim, "hidden": hidden, "n": n,
+            "in_dim": in_dim, "hidden": hidden, "layers": layers, "n": n,
             "seed_base": seed_base + w * 7919,
-            "max_steps": max_steps, "state_bytes": buf.getvalue(),
+            "max_steps": max_steps, "eps": eps, "state_bytes": buf.getvalue(),
         })
     return cfgs
 

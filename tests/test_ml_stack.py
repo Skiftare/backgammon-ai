@@ -15,7 +15,7 @@ from core.board import Position
 from core.features import Encoder
 from model.net import make_value_net
 from training.selfplay import play_one_game
-from training.td import train_episode
+from training.td import ValueTrainer
 
 
 def test_td_loss_finite_and_positive():
@@ -28,7 +28,8 @@ def test_td_loss_finite_and_positive():
     assert len(traj) >= 2
     assert winner in ("white", "black")
 
-    loss = train_episode(net, enc, traj, winner, lr=1e-3)
+    trainer = ValueTrainer(net, lr=1e-3, device="cpu", fp16=False)
+    loss = trainer.step([(list(traj), winner)], enc)
     assert torch.isfinite(torch.tensor(loss))
     assert loss > 1e-9
 
