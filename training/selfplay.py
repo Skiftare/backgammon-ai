@@ -175,3 +175,100 @@ def play_parallel(net: ValueNet, encoder: Encoder, n: int, workers: int,
         for res in ex.map(_play_worker, tasks):
             games.extend(res)
     return games[:n]
+
+
+def simulate_games_batched(net: ValueNet, encoder: Encoder, n: int, device: str = "cpu",
+                           seed_base: int = 0, max_steps: int = 1000, eps: float = 0.0):
+    """Генерация n партий ОДНОВРЕМЕННО, с батченной оценкой кандидатов на GPU.
+
+    Каждый плюс: для КАЖДОЙ активной партии перебираем легальные ходы (движок на CPU),
+    кандидаты ВСЕХ партий кодируются в один большой тензор и прогоняются одним forward —
+    это по-настоящему грузит видеокарту (вместо K×маленьких вызовов). ε-greedy
+    (`eps>0`) даёт exploration и снимает «травоядность» локального жадного режима.
+    """
+    import torch
+
+    from core.game import legal_moves, apply_move
+
+    # состояние партии: позиция, траектория, активна?
+    positions = [Position.initial() for _ in range(n)]
+    trajs: list[list[Position]] = [[p] for p in positions]
+    alive = [True] * n
+    rg = random.Random(seed_base)
+
+    whome = lambda p: p.turn == "white"
+
+    for _ in range(max_steps):
+        active = [i for i in range(n) if alive[i]]
+        if not active:
+            break
+
+        # 1) бросок и легальные кандидаты для каждого активного
+        rows: list[list[Position]] = []   # rows[i] = кандидаты игры active[i]
+        rolls: list = []
+        for i in active:
+            a, b = rg.randint(1, 6), rg.randint(1, 6)
+            roll = (a, a, a, a) if a == b else (a, b)
+            moves = legal_moves(positions[i], roll)
+            rolls.append(roll)
+            if moves:
+                rows.append([apply_move(positions[i], m) for m in moves])
+            else:
+                # хода нет — фишки не трогаем, меняем сторону
+                rows.append([None])  # маркер «пасс»
+            # проверим терминал прямо тут (не ждать след. цикл)
+            p = positions[i]
+            if p.home_white == 15 or p.home_black == 15:
+                alive[i] = False
+
+        # 2) один батч-forward по ВСЕМ кандидатам
+        flat = []
+        for r in rows:
+            flat.extend(x for x in r if x is not None)
+        if flat:
+            X = torch.stack([torch.tensor(encoder.encode(p), dtype=torch.float32) for p in flat]).to(device)
+            with torch.no_grad():
+                V = net.value(X)
+        else:
+            V = torch.tensor([], dtype=torch.float32)
+
+        # 3) применяем выбор хода к каждой партии
+        off = 0
+        for k, i in enumerate(active):
+            cands = rows[k]
+            if len(cands) == 0:
+                alive[i] = False
+                continue
+            if len(cands) == 1 and cands[0] is None:
+                # пасс: меняем сторону, фишки не трогаем
+                positions[i] = Position(
+                    points=positions[i].points,
+                    bar_white=positions[i].bar_white,
+                    bar_black=positions[i].bar_black,
+                    home_white=positions[i].home_white,
+                    home_black=positions[i].home_black,
+                    turn="black" if positions[i].turn == "white" else "white",
+                )
+                trajs[i].append(positions[i])
+                continue
+            # value пачки кандидатов этой партии
+            sub = V[off:off + len(cands)]
+            off += len(cands)
+            if eps and rg.random() < eps:
+                pick = rg.randrange(len(cands))
+            else:
+                pick = int(torch.argmax(sub)) if whome(positions[i]) else int(torch.argmin(sub))
+            positions[i] = cands[pick]
+            trajs[i].append(positions[i])
+            p = positions[i]
+            if p.home_white == 15 or p.home_black == 15:
+                alive[i] = False
+
+        if not any(alive):
+            break
+
+    games = []
+    for i, t in enumerate(trajs):
+        winner = "white" if t[-1].home_white >= t[-1].home_black else "black"
+        games.append((list(t), winner))
+    return games

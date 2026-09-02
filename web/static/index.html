@@ -257,7 +257,7 @@ async function agentTurn(){
   const ms = 4000 + Math.random()*3000;  // 4–7 секунд «думает»
   setMsg('Соперник выбрасывает: '+agentRoll.join(' '));
   await sleep(ms);
-  const m=await api('/api/agent_move',{pos:state});
+  const m=await api('/api/agent_move',{pos:state, roll:agentRoll});
   if(m.error){ busy=false; thinking=false; setMsg(m.error); return; }
   agentRoll=null;
   const steps=m.steps||[];
@@ -287,7 +287,7 @@ document.getElementById('board1').addEventListener('click', async (e)=>{
     if(r.error){ setMsg(r.error); return; }
     if(r.turned){ state=r.pos; redraw(); setMsg('Нет ходов под бросок — переход хода.'); checkTurn(); return; }
     state=r.pos; roll=r.roll; sel=null;
-    const h=await api('/api/steps',{pos:state});
+    const h=await api('/api/steps',{pos:state, roll});
     rebuildHints(h.steps);
     redraw();
     setMsg('Твой бросок: '+roll.join(' ')+'. Зелёные — ходы. Кликни фишку.');
@@ -310,7 +310,7 @@ document.getElementById('board1').addEventListener('click', async (e)=>{
   const dsts=dstBySrc[sel]||new Set();
   if(dsts.has(p)){
     const fr=sel; sel=null;
-    const r=await api('/api/step',{pos:state, from:fr, to:p});
+    const r=await api('/api/step',{pos:state, roll, from:fr, to:p});
     if(r.error){ setMsg(r.error); return; }
     state=r.pos;
     if(r.done){
@@ -320,7 +320,7 @@ document.getElementById('board1').addEventListener('click', async (e)=>{
       checkTurn();
     } else {
       roll=r.roll;
-      const h=await api('/api/steps',{pos:state});
+      const h=await api('/api/steps',{pos:state, roll});
       rebuildHints(h.steps);
       redraw();
       setMsg('Осталось костей: '+roll.join(' ')+'. Следующий шаг.');
