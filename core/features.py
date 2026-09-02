@@ -65,11 +65,10 @@ class Encoder:
 
     @staticmethod
     def _encode_side(counts: list[int], max_on_point: int) -> np.ndarray:
-        out = []
-        for cnt in counts:
-            capped = min(cnt, max_on_point)
-            out.extend(1.0 if capped >= k else 0.0 for k in range(1, max_on_point + 1))
-        return np.array(out, dtype=float)
+        arr = np.minimum(np.asarray(counts, dtype=float), max_on_point)
+        # (M,24): для каждой точки — маска >=1, >=2, ... >=M (# фишек)
+        mask = arr[None, :] >= np.arange(1, max_on_point + 1)[:, None]
+        return mask.ravel().astype(float)
 
     def __repr__(self) -> str:
         return f"Encoder(dim={self.dim()})"

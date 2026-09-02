@@ -18,15 +18,13 @@ import torch.nn as nn
 
 
 class ValueNet(nn.Module):
-    def __init__(self, in_dim: int, hidden: int = 128, out: int = 1) -> None:
+    def __init__(self, in_dim: int, hidden: int = 512, out: int = 1, layers: int = 2) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, out),
-        )
+        mods: list[nn.Module] = [nn.Linear(in_dim, hidden), nn.Tanh()]
+        for _ in range(max(1, layers) - 1):
+            mods += [nn.Linear(hidden, hidden), nn.Tanh()]
+        mods += [nn.Linear(hidden, out)]
+        self.net = nn.Sequential(*mods)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, in_dim) -> (B, 1) value в [-1,1] (Tanh на выходе как в td-gammon)
@@ -37,7 +35,8 @@ class ValueNet(nn.Module):
         return self.forward(x).squeeze(-1)
 
 
-def make_value_net(in_dim: int, hidden: int = 128, seed: int | None = None) -> ValueNet:
+def make_value_net(in_dim: int, hidden: int = 512, layers: int = 2,
+                   seed: int | None = None) -> ValueNet:
     if seed is not None:
         torch.manual_seed(seed)
-    return ValueNet(in_dim, hidden)
+    return ValueNet(in_dim, hidden=hidden, layers=layers)

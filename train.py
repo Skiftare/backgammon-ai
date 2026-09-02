@@ -115,7 +115,10 @@ def _start_tensorboard(logdir: str, host: str, port: int):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=500)
-    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--hidden", type=int, default=512,
+                    help="ширина скрытых слоёв (больше = дороже forward на GPU)")
+    ap.add_argument("--layers", type=int, default=2,
+                    help="число скрытых слоёв (2 = 293→512→512→1)")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--lam", type=float, default=0.7)
     ap.add_argument("--seed", type=int, default=42)
@@ -145,7 +148,7 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     enc = Encoder()
-    net = make_value_net(enc.dim(), hidden=args.hidden)
+    net = make_value_net(enc.dim(), hidden=args.hidden, layers=args.layers)
     net.train()
     net.to(device)
 
