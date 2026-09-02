@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-import numpy as np
 import torch
 
 from core.features import Encoder
@@ -44,15 +43,14 @@ class ValueTrainer:
 
     def step(self, games, encoder: Encoder, lam: float = 0.7, gamma: float = 1.0) -> float:
         net = self.net
-        # 1) кодируем ВСЕ позиции всех партий в один массив
-        feats: list[np.ndarray] = []
+        # 1) кодируем ВСЕ позиции всех партий ОДНИМ батч-энкодером (векторно)
+        all_pos: list = []
         spans: list[tuple[int, int, str]] = []
         for traj, winner in games:
-            s = len(feats)
-            for p in traj:
-                feats.append(encoder.encode(p))
-            spans.append((s, len(feats), winner))
-        X = torch.tensor(np.array(feats), dtype=torch.float32, device=self.device)
+            s = len(all_pos)
+            all_pos.extend(traj)
+            spans.append((s, len(all_pos), winner))
+        X = torch.tensor(encoder.encode_batch(all_pos), dtype=torch.float32, device=self.device)
 
         self.opt.zero_grad()
         use = torch.autocast(device_type="cuda", enabled=self.fp16)
@@ -62,15 +60,12 @@ class ValueTrainer:
             for (s, e, winner) in spans:
                 Vg = V[s:e]
                 T = e - s
-                r_last = SIGNS[winner]
-                deltas = []
-                v_next = torch.zeros((), dtype=torch.float32, device=self.device)
-                for t in range(T - 1, -1, -1):
-                    r = r_last if t == T - 1 else 0.0
-                    delta = r + gamma * (-v_next) - Vg[t]
-                    deltas.append(delta)
-                    v_next = Vg[t]
-                total = total + torch.stack(deltas).pow(2).mean()
+                # delta_t = r_t + gamma*(-V_{t+1}) - V_t ; для t=T-1: r=sign
+                Vshift = torch.cat([Vg[1:T], torch.zeros(1, dtype=Vg.dtype, device=Vg.device)])
+                r = torch.zeros_like(Vg)
+                r[-1] = SIGNS[winner]
+                delta = r + gamma * (-Vshift) - Vg
+                total = total + delta.pow(2).mean()
             loss = total / max(1, len(games))
 
         self.scaler.scale(loss).backward()

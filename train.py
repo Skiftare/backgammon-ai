@@ -117,11 +117,11 @@ def _start_tensorboard(logdir: str, host: str, port: int):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--epochs", type=int, default=500)
-    ap.add_argument("--hidden", type=int, default=512,
+    ap.add_argument("--epochs", type=int, default=2000)
+    ap.add_argument("--hidden", type=int, default=1024,
                     help="ширина скрытых слоёв (больше = дороже forward на GPU)")
-    ap.add_argument("--layers", type=int, default=2,
-                    help="число скрытых слоёв (2 = 293→512→512→1)")
+    ap.add_argument("--layers", type=int, default=3,
+                    help="число скрытых слоёв")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--lam", type=float, default=0.7)
     ap.add_argument("--seed", type=int, default=42)
@@ -130,8 +130,8 @@ def main() -> None:
     ap.add_argument("--save-every", type=int, default=100)
     ap.add_argument("--replay-every-min", type=float, default=5.0)
     ap.add_argument("--max-steps", type=int, default=500)
-    ap.add_argument("--batch", type=int, default=64,
-                    help="партий на шаг (>=1 партии, генерация батчем на устройстве)")
+    ap.add_argument("--batch", type=int, default=512,
+                    help="партий на шаг (БОЛЬШОЙ batch = один большой forward на GPU, важнее всего)")
     ap.add_argument("--eps", type=float, default=0.1,
                     help="вероятность случайного хода в самоплее (exploration, снимает травоядность)")
     ap.add_argument("--workers", type=int, default=0,
@@ -201,16 +201,20 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         step = start_step + epoch
 
+        t_gen = time.time()
         games = []
         for f in futures:
             games.extend(f.result())
+        dt_gen = time.time() - t_gen
         n_played += len(games)
 
         # сразу запускаем генерацию следующего батча (пока ниже обучаемся)
         if epoch < args.epochs:
             futures = _submit(step + 1)
 
+        t_learn = time.time()
         loss = trainer.step(games, enc, lam=args.lam)
+        dt_learn = time.time() - t_learn
 
         winners = [g[1] for g in games]
         win = sum(1.0 if w == "white" else 0.0 for w in winners) / len(winners)
@@ -246,7 +250,9 @@ def main() -> None:
                 writer.add_scalar(f"train/{k}", v, step)
         else:
             if epoch % 20 == 0 or epoch == 1:
-                print(f"step {step} | loss {float(loss):.4f} | wr {_mean(wins):.2f} | len {int(_mean(lens_this)):3d}", flush=True)
+                print(f"step {step} | loss {float(loss):.4f} | wr {_mean(wins):.2f} | "
+                      f"len {int(_mean(lens_this)):3d} | gen {dt_gen:.1f}s | learn {dt_learn:.2f}s",
+                      flush=True)
 
         if time.time() - last_replay >= args.replay_every_min * 60:
             last_replay = time.time()

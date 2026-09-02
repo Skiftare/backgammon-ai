@@ -230,7 +230,7 @@ def simulate_games_batched(net: ValueNet, encoder: Encoder, n: int, device: str 
         for r in rows:
             flat.extend(x for x in r if x is not None)
         if flat:
-            X = torch.stack([torch.tensor(encoder.encode(p), dtype=torch.float32) for p in flat]).to(device)
+            X = torch.tensor(encoder.encode_batch(flat), dtype=torch.float32, device=device)
             with torch.no_grad():
                 V = net.value(X)
         else:

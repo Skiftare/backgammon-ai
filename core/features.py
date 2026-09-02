@@ -39,29 +39,50 @@ class Encoder:
         return d
 
     def encode(self, pos: Position) -> np.ndarray:
-        if pos.turn == "white":
-            self_counts = [max(0, v) for v in pos.points]
-            opp_counts = [max(0, -v) for v in pos.points]
-            bar_self, home_self = pos.bar_white, pos.home_white
-            bar_opp, home_opp = pos.bar_black, pos.home_black
-            turn_bit = 1.0
-        else:
-            # чёрный ход: инвертируем «свои/противник»
-            self_counts = [max(0, -v) for v in pos.points]
-            opp_counts = [max(0, v) for v in pos.points]
-            bar_self, home_self = pos.bar_black, pos.home_black
-            bar_opp, home_opp = pos.bar_white, pos.home_white
-            turn_bit = 0.0
+        return self.encode_batch([pos])[0]
 
-        own = self._encode_side(self_counts, self.max_on_point)
-        opp = self._encode_side(opp_counts, self.max_on_point)
-        tail = np.array(
-            [bar_self / 15.0, home_self / 15.0, bar_opp / 15.0, home_opp / 15.0],
-            dtype=float,
-        )
+    def encode_batch(self, positions: list[Position]) -> np.ndarray:
+        """Векторно закодировать список позиций в один np-массив (N, dim).
+
+        Весь энкодинг считаем numpy-операциями на массиве (N,24) — это снимает
+        per-position Python-цикл и позволяет отдать GPU ОДИН большой тензор.
+        """
+        N = len(positions)
+        P = np.zeros((N, N_POINTS), dtype=float)
+        for i, p in enumerate(positions):
+            P[i] = p.points
+        # маска: белый ход => свои = +points, чёрный => свои = -points
+        turn_w = np.array([p.turn == "white" for p in positions], dtype=bool)
+        M = self.max_on_point
+
+        values = np.where(turn_w[:, None], P, -P)      # (N,24) свои (полож.)
+        own_counts = np.maximum(values, 0)
+        opp_counts = np.maximum(-values, 0)
+        own = self._encode_side_batch(own_counts, M)   # (N, 24*M)
+        opp = self._encode_side_batch(opp_counts, M)
+
+        bars_self = np.where(turn_w, np.array([p.bar_white for p in positions], dtype=float),
+                             np.array([p.bar_black for p in positions], dtype=float))
+        homes_self = np.where(turn_w, np.array([p.home_white for p in positions], dtype=float),
+                              np.array([p.home_black for p in positions], dtype=float))
+        bars_opp = np.where(turn_w, np.array([p.bar_black for p in positions], dtype=float),
+                            np.array([p.bar_white for p in positions], dtype=float))
+        homes_opp = np.where(turn_w, np.array([p.home_black for p in positions], dtype=float),
+                             np.array([p.home_white for p in positions], dtype=float))
+
+        tail_cols = [bars_self / 15.0, homes_self / 15.0, bars_opp / 15.0, homes_opp / 15.0]
+        tail = np.stack(tail_cols, axis=1)
         if self.include_turn:
-            tail = np.concatenate([tail, np.array([turn_bit], dtype=float)])
-        return np.concatenate([own, opp, tail])
+            tail = np.concatenate([tail, turn_w[:, None].astype(float)], axis=1)
+
+        return np.concatenate([own, opp, tail], axis=1)
+
+    @staticmethod
+    def _encode_side_batch(counts: np.ndarray, max_on_point: int) -> np.ndarray:
+        counts = np.minimum(counts, max_on_point)
+        # (N,24, M): counts[..., None] >= arange(M) -> пороговая маска
+        mask = counts[:, :, None] >= np.arange(1, max_on_point + 1)[None, None, :]
+        return mask.reshape(counts.shape[0], -1).astype(float)
 
     @staticmethod
     def _encode_side(counts: list[int], max_on_point: int) -> np.ndarray:
