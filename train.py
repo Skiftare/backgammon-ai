@@ -30,8 +30,8 @@ import numpy as np
 
 from core.features import Encoder
 from model.net import make_value_net
-from training.selfplay import build_worker_cfgs, _play_worker
-from training.selfplay_gpu import simulate_games_batched_v2
+from training.selfplay import build_worker_cfgs
+from training.selfplay_gpu import _play_worker_memo, simulate_games_batched_v2
 from training.td import ValueTrainer
 
 try:
@@ -190,12 +190,15 @@ def main() -> None:
     print(f"[par] {workers} воркеров генерят партии | батч {args.batch} | eps {args.eps} | "
           f"fp16={trainer.fp16} | устройство обучения: {device}", flush=True)
 
-    # Режим генерации: batched (in-process, GPU-нагрузка) или parallel (CPU-воркеры)
+    # Режим генерации: batched (1 процесс, GPU-батчинг) или parallel (N CPU-воркеров
+    # с мемо-движком + конвейер: след. батч генерится, пока GPU учит текущий).
     if args.selfplay == "auto":
-        use_batched = (device == "cuda")
+        # на GPU — parallel (все ядра генерят, GPU учит; конвейер), на CPU без GPU —
+        # batched (один процесс, без процессов, безопасно для малых RAM).
+        use_batched = (device != "cuda")
     else:
         use_batched = (args.selfplay == "batched")
-    print(f"[selfplay] режим: {'BATCHED (мемо-движок + pad-to-K, грузит GPU)' if use_batched else 'PARALLEL (CPU-воркеры)'} "
+    print(f"[selfplay] режим: {'BATCHED (1 процесс, мемо+pad-to-K)' if use_batched else 'PARALLEL (CPU-воркеры с мемо, конвейер, грузит все ядра)'} "
           f"| select={args.select}", flush=True)
 
     last_replay = time.time()
@@ -215,7 +218,10 @@ def main() -> None:
         assert pool is not None  # вызывается только в parallel-режиме
         cfgs = build_worker_cfgs(net, args.batch, workers,
                                  args.seed * 1000 + step, args.max_steps, args.eps)
-        return [pool.submit(_play_worker, c) for c in cfgs]
+        # воркеры используют мемо-движок (все ядра) + знак выбора
+        for c in cfgs:
+            c["select"] = args.select
+        return [pool.submit(_play_worker_memo, c) for c in cfgs]
 
     if not use_batched:
         futures = _submit(start_step + 1)

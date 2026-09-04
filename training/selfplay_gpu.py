@@ -272,3 +272,32 @@ def simulate_games_batched_v2(net, n: int = 64, device: str = "cpu",
         winner = "white" if t[-1].home_white >= t[-1].home_black else "black"
         games.append((list(t), winner))
     return games
+
+
+# --------------------------------------------------- параллельная генерация
+
+def _play_worker_memo(cfg: dict):
+    """Воркер для ProcessPoolExecutor: CPU-копия сети + МЕМО-движок.
+
+    В отличие от `selfplay._play_worker` (старый legal_moves, 1 ядро/процесс),
+    здесь `simulate_games_batched_v2` использует мемоизированный DFS — на дублях
+    ~123x меньше DFS-узлов, поэтому каждый процесс генерёт сильно быстрее.
+    Так все ядра работают, а главный процесс на GPU только кодирует и учит.
+    """
+    import io
+
+    import torch
+
+    from model.net import make_value_net
+
+    net = make_value_net(cfg["in_dim"], hidden=cfg["hidden"], layers=cfg["layers"])
+    buf = io.BytesIO(cfg["state_bytes"])
+    net.load_state_dict(torch.load(buf, map_location="cpu"))
+    net.eval()
+    enc = Encoder()
+    memo: dict = {}
+    return simulate_games_batched_v2(
+        net, n=cfg["n"], device="cpu", seed_base=cfg["seed_base"],
+        max_steps=cfg["max_steps"], eps=cfg["eps"], encoder=enc,
+        memo_engine=True, memo=memo, select=cfg.get("select", "old"),
+    )
