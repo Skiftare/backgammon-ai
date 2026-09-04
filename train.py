@@ -31,6 +31,7 @@ import numpy as np
 from core.features import Encoder
 from model.net import make_value_net
 from training.selfplay import build_worker_cfgs, _play_worker
+from training.selfplay_gpu import simulate_games_batched_v2
 from training.td import ValueTrainer
 
 try:
@@ -135,7 +136,14 @@ def main() -> None:
     ap.add_argument("--eps", type=float, default=0.1,
                     help="вероятность случайного хода в самоплее (exploration, снимает травоядность)")
     ap.add_argument("--workers", type=int, default=0,
-                    help="процессов генерации партий (0 = все ядра)")
+                    help="процессов генерации партий в parallel-режиме (0 = все ядра; "
+                         "используется только если --selfplay parallel)")
+    ap.add_argument("--selfplay", default="auto", choices=["auto", "batched", "parallel"],
+                    help="auto: batched на GPU / parallel на CPU; batched = мемо-движок + "
+                         "pad-to-K в одном процессе (грузит GPU); parallel = CPU-воркеры")
+    ap.add_argument("--select", default="old", choices=["old", "fixed"],
+                    help="знак выбора хода: old = текущее поведение (белый argmax V), "
+                         "fixed = оба argmin V кандидата (экспериментально, матем. обосн.)")
     ap.add_argument("--device", default=None,
                     help="auto/cpu/cuda (по умолчанию cuda, если доступна)")
     ap.add_argument("--host", default="127.0.0.1", help="адрес привязки TB (0.0.0.0 = сеть)")
@@ -182,34 +190,54 @@ def main() -> None:
     print(f"[par] {workers} воркеров генерят партии | батч {args.batch} | eps {args.eps} | "
           f"fp16={trainer.fp16} | устройство обучения: {device}", flush=True)
 
+    # Режим генерации: batched (in-process, GPU-нагрузка) или parallel (CPU-воркеры)
+    if args.selfplay == "auto":
+        use_batched = (device == "cuda")
+    else:
+        use_batched = (args.selfplay == "batched")
+    print(f"[selfplay] режим: {'BATCHED (мемо-движок + pad-to-K, грузит GPU)' if use_batched else 'PARALLEL (CPU-воркеры)'} "
+          f"| select={args.select}", flush=True)
+
     last_replay = time.time()
     W = 100
     wins, lens, rewards, losses = [], [], [], []
     n_played = 0
 
-    # Конвейер: воркеры (все ядра) генерят следующий батч, ПОКА GPU учит текущий —
-    # устройство не простаивает, генерация и обучение перекрываются.
-    pool = ProcessPoolExecutor(max_workers=workers)
+    # В parallel-режиме: конвейер воркеры генерят следующий батч, ПОКА GPU учит текущий.
+    # В batched-режиме генерация сама грузит GPU (net.value на батчах кандидатов) —
+    # конвейер не нужен, всё в одном процессе последовательно.
+    pool = None
+    futures = []
+    if not use_batched:
+        pool = ProcessPoolExecutor(max_workers=workers)
 
     def _submit(step):
+        assert pool is not None  # вызывается только в parallel-режиме
         cfgs = build_worker_cfgs(net, args.batch, workers,
                                  args.seed * 1000 + step, args.max_steps, args.eps)
         return [pool.submit(_play_worker, c) for c in cfgs]
 
-    futures = _submit(start_step + 1)
+    if not use_batched:
+        futures = _submit(start_step + 1)
 
     for epoch in range(1, args.epochs + 1):
         step = start_step + epoch
 
         t_gen = time.time()
-        games = []
-        for f in futures:
-            games.extend(f.result())
+        if use_batched:
+            games = simulate_games_batched_v2(
+                net, n=args.batch, device=device, seed_base=args.seed * 1000 + step,
+                max_steps=args.max_steps, eps=args.eps, encoder=enc,
+                memo_engine=True, select=args.select)
+        else:
+            games = []
+            for f in futures:
+                games.extend(f.result())
         dt_gen = time.time() - t_gen
         n_played += len(games)
 
         # сразу запускаем генерацию следующего батча (пока ниже обучаемся)
-        if epoch < args.epochs:
+        if not use_batched and epoch < args.epochs:
             futures = _submit(step + 1)
 
         t_learn = time.time()
@@ -264,7 +292,8 @@ def main() -> None:
             torch.save(net.state_dict(), p)
             print(f"[ckpt] {p}", flush=True)
 
-    pool.shutdown(cancel_futures=True)
+    if pool is not None:
+        pool.shutdown(cancel_futures=True)
     torch.save(net.state_dict(), os.path.join(args.ckpt_dir, "net_final.pt"))
     print("Готово. TB:", logdir, "| веса:", os.path.join(args.ckpt_dir, "net_final.pt"), flush=True)
 
