@@ -101,6 +101,8 @@ def _play_worker(cfg: dict):
 
     from model.net import make_value_net
 
+    torch.set_num_threads(1)  # см. _play_worker_memo: борьба с oversubscription
+
     net = make_value_net(cfg["in_dim"], hidden=cfg["hidden"], layers=cfg["layers"])
     buf = io.BytesIO(cfg["state_bytes"])
     net.load_state_dict(torch.load(buf, map_location="cpu"))

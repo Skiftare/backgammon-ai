@@ -418,6 +418,11 @@ def _play_worker_memo(cfg: dict):
 
     from model.net import make_value_net
 
+    # КРИТИЧНО для параллельного режима: воркер-процесс наследует intra-op threads
+    # = числу ядер; при N воркеров выйдет N x cores потоков -> oversubscription,
+    # CPU трэш, всё тормозит. Каждый воркер — 1 поток на матmul.
+    torch.set_num_threads(1)
+
     net = make_value_net(cfg["in_dim"], hidden=cfg["hidden"], layers=cfg["layers"])
     buf = io.BytesIO(cfg["state_bytes"])
     net.load_state_dict(torch.load(buf, map_location="cpu"))
