@@ -31,7 +31,8 @@ import numpy as np
 from core.features import Encoder
 from model.net import make_value_net
 from training.selfplay import build_worker_cfgs
-from training.selfplay_gpu import _play_worker_memo, simulate_games_batched_v2
+from training.selfplay_gpu import (_play_worker_memo, play_match_arena,
+                                     simulate_games_batched_v2)
 from training.td import ValueTrainer
 
 try:
@@ -43,6 +44,27 @@ except Exception:
 
 def _mean(xs):
     return sum(xs) / len(xs) if xs else 0.0
+
+
+def _prev_ckpt(ckpt_dir: str, before_step: int) -> str | None:
+    """Последний номерной чекпоинт со step < before_step (для arena-противника).
+
+    Возвращает путь или None (если нет ни одного чекпоинта строго старше).
+    """
+    if not os.path.isdir(ckpt_dir):
+        return None
+    best = None
+    best_step = -1
+    for f in os.listdir(ckpt_dir):
+        if f.startswith("net_") and f.endswith(".pt") and f != "net_final.pt":
+            try:
+                s = int(f[4:-3])
+            except ValueError:
+                continue
+            if s < before_step and s > best_step:
+                best_step = s
+                best = os.path.join(ckpt_dir, f)
+    return best
 
 
 def _last_ckpt(ckpt_dir: str) -> str | None:
@@ -141,9 +163,19 @@ def main() -> None:
     ap.add_argument("--selfplay", default="auto", choices=["auto", "batched", "parallel"],
                     help="auto: batched на GPU / parallel на CPU; batched = мемо-движок + "
                          "pad-to-K в одном процессе (грузит GPU); parallel = CPU-воркеры")
-    ap.add_argument("--select", default="old", choices=["old", "fixed"],
-                    help="знак выбора хода: old = текущее поведение (белый argmax V), "
-                         "fixed = оба argmin V кандидата (экспериментально, матем. обосн.)")
+    ap.add_argument("--select", default="fixed", choices=["old", "fixed"],
+                    help="знак выбора хода: fixed = оба argmin V кандидата (матем. "
+                         "корректно: V кандидата = шанс соперника; фиксирует баг, где "
+                         "белый выбирал argmax — играл за соперника); old = старое (баговое)")
+    ap.add_argument("--symmetrize", default=True, action=argparse.BooleanOptionalAction,
+                    help="зеркальная симметризация: каждая партия дублируется зеркальным "
+                         "близнецом (индексы/цвет/бар/дом развёрнуты) -> сеть учит одну "
+                         "геометрию, убивает перекос «белый/чёрный», сходимость быстрее")
+    ap.add_argument("--arena-every", type=int, default=0,
+                    help="каждые N эпох arena: новая модель против последнего снапшота "
+                         "(0 = выкл). Пишет train/arena_winrate в TB")
+    ap.add_argument("--arena-games", type=int, default=100,
+                    help="партий на arena (чётное; половина A белыми, половина чёрными)")
     ap.add_argument("--device", default=None,
                     help="auto/cpu/cuda (по умолчанию cuda, если доступна)")
     ap.add_argument("--host", default="127.0.0.1", help="адрес привязки TB (0.0.0.0 = сеть)")
@@ -234,7 +266,7 @@ def main() -> None:
             games = simulate_games_batched_v2(
                 net, n=args.batch, device=device, seed_base=args.seed * 1000 + step,
                 max_steps=args.max_steps, eps=args.eps, encoder=enc,
-                memo_engine=True, select=args.select)
+                memo_engine=True, select=args.select, symmetrize=args.symmetrize)
         else:
             games = []
             for f in futures:
@@ -297,6 +329,29 @@ def main() -> None:
             p = os.path.join(args.ckpt_dir, f"net_{step}.pt")
             torch.save(net.state_dict(), p)
             print(f"[ckpt] {p}", flush=True)
+
+        # --- arena: новая модель против последнего снапшота ---
+        if args.arena_every > 0 and step % args.arena_every == 0:
+            snap = _prev_ckpt(args.ckpt_dir, step)
+            if snap is not None:
+                t_ar = time.time()
+                opp = make_value_net(enc.dim(), hidden=args.hidden, layers=args.layers)
+                opp.load_state_dict(torch.load(snap, map_location="cpu"))
+                opp.eval()
+                net.eval()
+                res = play_match_arena(
+                    net, opp, n=args.arena_games, device=device,
+                    seed_base=args.seed * 777 + step, max_steps=args.max_steps,
+                    eps=0.0, encoder=enc, select=args.select)
+                net.train()
+                dt_ar = time.time() - t_ar
+                print(f"[arena] step {step}: winrate(new)={res['winrate']:.3f} "
+                      f"(white {res['winrate_white']:.3f}, black {res['winrate_black']:.3f}) "
+                      f"vs {os.path.basename(snap)} [{dt_ar:.0f}s]", flush=True)
+                if writer is not None:
+                    writer.add_scalar("train/arena_winrate", res["winrate"], step)
+                    writer.add_scalar("train/arena_winrate_white", res["winrate_white"], step)
+                    writer.add_scalar("train/arena_winrate_black", res["winrate_black"], step)
 
     if pool is not None:
         pool.shutdown(cancel_futures=True)

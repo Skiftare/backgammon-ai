@@ -69,6 +69,29 @@ def pack_exact(pos: Position) -> int:
     return (k << 1) | (0 if pos.turn == "white" else 1)
 
 
+def mirror_position(pos: Position) -> Position:
+    """Полное зеркало позиции (инвариант игры): разворот оси доски.
+
+    p -> 23-p (индексы), знак каждой фишки инвертируется (белые<->чёрные),
+    бар/дом меняются местами, ходящий переходит. Это изометрия правил:
+    legal_moves(mirror(p), roll) совпадает с legal_moves(p, roll) с точностью
+    до зеркала индексов (проверено в _movgen_sym). Позволяет симметризовать
+    обучение: каждая партия и её зеркальный близнец дают сеть, инвариантную
+    к цвету, и убивают перекос «белые всегда» из-за преимущества первого хода.
+    """
+    pts = [0] * N_POINTS
+    for i, v in enumerate(pos.points):
+        pts[N_POINTS - 1 - i] = -v
+    return Position(
+        points=tuple(pts),
+        bar_white=pos.bar_black,
+        bar_black=pos.bar_white,
+        home_white=pos.home_black,
+        home_black=pos.home_white,
+        turn="black" if pos.turn == "white" else "white",
+    )
+
+
 # ------------------------------------------------------------- движок ------
 
 def legal_moves_memo(pos: Position, roll, memo: dict | None = None) -> list[Move]:
@@ -158,7 +181,7 @@ def simulate_games_batched_v2(net, n: int = 64, device: str = "cpu",
                               seed_base: int = 0, max_steps: int = 1000, eps: float = 0.0,
                               encoder: Encoder | None = None, memo_engine: bool = True,
                               fast_encode: bool = False, memo: dict | None = None,
-                              select: str = "old"):
+                              select: str = "old", symmetrize: bool = False):
     """Аналог simulate_games_batched: генерация n партий с батченной оценкой
     кандидатов. Все device-агностичны; на сервере тот же код с device='cuda'.
 
@@ -271,7 +294,112 @@ def simulate_games_batched_v2(net, n: int = 64, device: str = "cpu",
     for i, t in enumerate(trajs):
         winner = "white" if t[-1].home_white >= t[-1].home_black else "black"
         games.append((list(t), winner))
+    if symmetrize:
+        # зеркальные близнецы: та же партия с зеркальной стороны
+        extra = []
+        for t, winner in games:
+            mt = [mirror_position(p) for p in t]
+            extra.append((mt, "black" if winner == "white" else "white"))
+        games.extend(extra)
     return games
+
+
+# ------------------------------------------------------- arena (2 сети) ----
+
+def play_match_arena(net_a, net_b, n: int = 64, device: str = "cpu",
+                     seed_base: int = 0, max_steps: int = 1000, eps: float = 0.0,
+                     encoder: Encoder | None = None, select: str | None = None,
+                     select_white: str = "auto", select_black: str = "auto",
+                     memo_per_game: bool = True, start_turn: str = "white"):
+    """Матч двух моделей: n партий с честной разбивкой по цветам.
+
+    В первой половине партий сеть A играет за белых, во второй — за чёрных,
+    чтобы убрать преимущество первого хода. Каждый игрок выбирает ход greedy
+    СВОЕЙ сетью (общий движок). Device-агностично: CPU — для проверки, cuda — на
+    сервере (тот же код, batch-forward по всем кандидатам одной сети разом).
+
+    memo_per_game=True (по умолч.): мемо-словарь на КАЖДУЮ партию и выбрасывается
+    после неё — память НЕ растёт с n (безопасно на малых машинах, защита от OOM).
+    Запускается per-партия без батча по всем играм — чуть медленнее, зато стабильно
+    по памяти (на сервере с 8+ ГБ можно memo_per_game=False и больше n).
+
+    Возвращает dict: winrate (общий), winrate_white, winrate_black, n.
+    """
+    enc = encoder or Encoder()
+    a_white = [True] * (n // 2 + n % 2) + [False] * (n // 2)
+    a_white = a_white[:n]
+
+    def other(t): return "black" if t == "white" else "white"
+
+    wins_a = wins_a_w = wins_a_b = n_aw = n_ab = 0
+
+    for game in range(n):
+        pos = Position.initial()
+        if start_turn == "black":
+            pos = Position(points=pos.points, bar_white=pos.bar_white,
+                           bar_black=pos.bar_black, home_white=pos.home_white,
+                           home_black=pos.home_black, turn="black")
+        rg = random.Random(seed_base * 1000 + game)
+        memo: dict = {}
+
+        def lm(p, roll):
+            if memo_per_game:
+                return legal_moves_memo(p, roll, memo)
+            return legal_moves(p, roll)
+
+        for _ in range(max_steps):
+            a, b = rg.randint(1, 6), rg.randint(1, 6)
+            roll = (a, a, a, a) if a == b else (a, b)
+            moves = lm(pos, roll)
+            if not moves:
+                pos = Position(points=pos.points, bar_white=pos.bar_white,
+                               bar_black=pos.bar_black, home_white=pos.home_white,
+                               home_black=pos.home_black, turn=other(pos.turn))
+            else:
+                turn = pos.turn
+                is_a = (turn == "white") == a_white[game]
+                net = net_a if is_a else net_b
+                nxts = [apply_move(pos, m) for m in moves]
+                X = torch.tensor(enc.encode_batch(nxts), dtype=torch.float32,
+                                 device=device)
+                with torch.no_grad():
+                    V = net.value(X)
+                sel = select_white if turn == "white" else select_black
+                if sel == "auto":
+                    sel = select or "old"
+                if sel == "fixed":
+                    sg = -1.0
+                else:
+                    sg = 1.0 if turn == "white" else -1.0
+                if eps and rg.random() < eps:
+                    idx = rg.randrange(len(nxts))
+                else:
+                    idx = int(torch.argmax(sg * V))
+                pos = nxts[idx]
+            if pos.home_white == 15 or pos.home_black == 15:
+                break
+
+        if pos.home_white == 15:
+            white_won = True
+        elif pos.home_black == 15:
+            white_won = False
+        else:
+            white_won = pos.home_white >= pos.home_black
+        a_won = (white_won == a_white[game])
+        wins_a += 1 if a_won else 0
+        if a_white[game]:
+            n_aw += 1
+            wins_a_w += 1 if a_won else 0
+        else:
+            n_ab += 1
+            wins_a_b += 1 if a_won else 0
+
+    return {
+        "winrate": wins_a / n,
+        "n": n,
+        "winrate_white": wins_a_w / max(1, n_aw),
+        "winrate_black": wins_a_b / max(1, n_ab),
+    }
 
 
 # --------------------------------------------------- параллельная генерация
